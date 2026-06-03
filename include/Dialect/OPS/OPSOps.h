@@ -6,16 +6,12 @@
 namespace ops_mlir::ops {
 
 class ParLoopOp : public mlir::Op<ParLoopOp> {
- public:
+public:
   using Op::Op;
 
-  static llvm::StringRef getOperationName() {
-    return "ops.par_loop";
-  }
+  static llvm::StringRef getOperationName() { return "ops.par_loop"; }
 
-  static llvm::ArrayRef<llvm::StringRef> getOperandNames() {
-    return {};
-  }
+  static llvm::ArrayRef<llvm::StringRef> getOperandNames() { return {}; }
 
   static llvm::ArrayRef<llvm::StringRef> getAttributeNames() {
     static llvm::StringRef attrNames[] = {
@@ -29,7 +25,7 @@ class ParLoopOp : public mlir::Op<ParLoopOp> {
 
   void print(mlir::OpAsmPrinter &p);
   static mlir::ParseResult parse(mlir::OpAsmParser &parser,
-                                  mlir::OperationState &result);
+                                 mlir::OperationState &result);
 };
 
 } // namespace ops_mlir::ops

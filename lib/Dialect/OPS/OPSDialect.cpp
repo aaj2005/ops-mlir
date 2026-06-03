@@ -9,12 +9,10 @@ using namespace ops_mlir::ops;
 
 namespace ops_mlir::ops {
 
-void OPSDialect::initialize() {
-  addOperations<ParLoopOp>();
-}
+void OPSDialect::initialize() { addOperations<ParLoopOp>(); }
 
 mlir::Attribute OPSDialect::parseAttribute(mlir::DialectAsmParser &parser,
-                                          mlir::Type type) const {
+                                           mlir::Type type) const {
   return nullptr;
 }
 
@@ -27,8 +25,7 @@ mlir::Type OPSDialect::parseType(mlir::DialectAsmParser &parser) const {
   return nullptr;
 }
 
-void OPSDialect::printType(mlir::Type type,
-                           mlir::DialectAsmPrinter &os) const {
+void OPSDialect::printType(mlir::Type type, mlir::DialectAsmPrinter &os) const {
   os << type;
 }
 

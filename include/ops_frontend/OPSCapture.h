@@ -3,25 +3,16 @@
 
 #include "ops_lib_core.h"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
-#include <type_traits>
 #include <vector>
-
 
 namespace ops_mlir {
 
-enum class ArgKind {
-  Dat,
-  Gbl,
-  Idx,
-  Reduce,
-  Unknown
-};
+enum class ArgKind { Dat, Gbl, Idx, Reduce, Unknown };
 
 struct DatDesc {
   std::uintptr_t handle = 0;
@@ -90,13 +81,9 @@ public:
 
   void setFlushCallback(FlushCallback callback);
 
-  void enqueueParLoop(std::uintptr_t kernelToken,
-                      const char *kernelName,
-                      ops_block block,
-                      int dims,
-                      const int *range,
-                      const ops_arg *args,
-                      std::size_t nargs);
+  void enqueueParLoop(std::uintptr_t kernelToken, const char *kernelName,
+                      ops_block block, int dims, const int *range,
+                      const ops_arg *args, std::size_t nargs);
 
   void flush();
 
@@ -105,13 +92,9 @@ public:
 private:
   CaptureRuntime() = default;
 
-  LoopDesc buildLoopDesc(std::uintptr_t kernelToken,
-                         const char *kernelName,
-                         ops_block block,
-                         int dims,
-                         const int *range,
-                         const ops_arg *args,
-                         std::size_t nargs);
+  LoopDesc buildLoopDesc(std::uintptr_t kernelToken, const char *kernelName,
+                         ops_block block, int dims, const int *range,
+                         const ops_arg *args, std::size_t nargs);
 
   ArgDesc buildArgDesc(const ops_arg &arg);
 
