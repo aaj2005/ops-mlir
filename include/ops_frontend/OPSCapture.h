@@ -1,6 +1,7 @@
-#pragma once
+#ifndef OPS_CAPTURE_H
+#define OPS_CAPTURE_H
 
-#include "ops_lib_types.h"
+#include "ops_lib_core.h"
 
 #include <array>
 #include <cstddef>
@@ -10,6 +11,7 @@
 #include <string>
 #include <type_traits>
 #include <vector>
+
 
 namespace ops_mlir {
 
@@ -127,43 +129,4 @@ const char *argKindToString(ArgKind kind);
 
 } // namespace ops_mlir
 
-// -----------------------------------------------------------------------------
-// OPS API interception point.
-//
-// Include this header instead of the normal backend par-loop header in your
-// prototype application. Keep using OPS declarations normally:
-//
-//   ops_decl_block
-//   ops_decl_dat
-//   ops_decl_stencil
-//   ops_arg_dat
-//   ops_arg_gbl
-//   ops_arg_idx
-//
-// This wrapper intercepts only ops_par_loop.
-// -----------------------------------------------------------------------------
-
-template <typename KernelFn, typename... Args>
-void ops_par_loop(KernelFn kernel,
-                  const char *name,
-                  ops_block block,
-                  int dims,
-                  int *range,
-                  Args... opsArgs) {
-  static_assert((std::is_same_v<std::decay_t<Args>, ops_arg> && ...),
-                "All ops_par_loop variadic arguments must be ops_arg values");
-
-  std::array<ops_arg, sizeof...(Args)> packedArgs{opsArgs...};
-
-  auto token = static_cast<std::uintptr_t>(
-      reinterpret_cast<std::uintptr_t>(kernel));
-
-  ops_mlir::CaptureRuntime::instance().enqueueParLoop(
-      token,
-      name,
-      block,
-      dims,
-      range,
-      packedArgs.data(),
-      packedArgs.size());
-}
+#endif // OPS_CAPTURE_H

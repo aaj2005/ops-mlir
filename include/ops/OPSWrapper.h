@@ -11,7 +11,6 @@
 #ifndef OPS_WRAPPER_H
 #define OPS_WRAPPER_H
 
-// #include "ops_lib_types.h"
 #include "ops_lib_core.h"
 #include "ops_frontend/OPSCapture.h"
 

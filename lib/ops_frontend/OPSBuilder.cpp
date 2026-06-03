@@ -1,4 +1,5 @@
 #include "ops_frontend/OPSBuilder.h"
+#include "Dialect/OPS/OPSDialect.h"
 #include "Dialect/OPS/OPSOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -11,7 +12,7 @@ namespace ops_mlir {
 
 OPSBuilder::OPSBuilder(mlir::MLIRContext *ctx) : ctx_(ctx) {
   // Register OPS dialect
-  ctx_->loadDialect<ops_mlir::ops::OPSDialect>();
+  ctx_->getOrLoadDialect<ops_mlir::ops::OPSDialect>();
 }
 
 mlir::ModuleOp OPSBuilder::buildModule(const std::vector<LoopDesc> &loops) {
@@ -123,28 +124,20 @@ mlir::Attribute OPSBuilder::buildArgAttr(const ArgDesc &arg, int ndim) {
   for (int64_t d : arg.dat.d_p) datShape.push_back(d);
   auto datShapeAttr = mlir::DenseI64ArrayAttr::get(ctx_, datShape);
 
-  // Create argument descriptor dictionary attribute
-  mlir::SmallVector<std::pair<mlir::Attribute, mlir::Attribute>> fields;
-  fields.push_back({mlir::StringAttr::get(ctx_, "kind"),
-                    builder.getI32IntegerAttr(static_cast<int32_t>(arg.kind))});
-  fields.push_back({mlir::StringAttr::get(ctx_, "access"),
-                    builder.getI32IntegerAttr(arg.access)});
-  fields.push_back({mlir::StringAttr::get(ctx_, "dim"),
-                    builder.getI32IntegerAttr(arg.dim)});
-  fields.push_back({mlir::StringAttr::get(ctx_, "elem_size"),
-                    builder.getI32IntegerAttr(arg.elem_size)});
-  fields.push_back({mlir::StringAttr::get(ctx_, "dat_ptr"),
-                    builder.getI64IntegerAttr(static_cast<int64_t>(arg.dat_handle))});
-  fields.push_back({mlir::StringAttr::get(ctx_, "host_ptr"),
-                    builder.getI64IntegerAttr(static_cast<int64_t>(arg.host_ptr))});
-  fields.push_back({mlir::StringAttr::get(ctx_, "stencil_offsets"),
-                    stencilOffsetsAttr});
-  fields.push_back({mlir::StringAttr::get(ctx_, "dat_shape"),
-                    datShapeAttr});
-  fields.push_back({mlir::StringAttr::get(ctx_, "ndim"),
-                    builder.getI32IntegerAttr(ndim)});
+  // Create argument descriptor as an array attribute
+  // Order: kind, access, dim, elem_size, dat_ptr, host_ptr, stencil_offsets, dat_shape, ndim
+  mlir::SmallVector<mlir::Attribute> argAttrs;
+  argAttrs.push_back(builder.getI32IntegerAttr(static_cast<int32_t>(arg.kind)));
+  argAttrs.push_back(builder.getI32IntegerAttr(arg.access));
+  argAttrs.push_back(builder.getI32IntegerAttr(arg.dim));
+  argAttrs.push_back(builder.getI32IntegerAttr(arg.elem_size));
+  argAttrs.push_back(builder.getI64IntegerAttr(static_cast<int64_t>(arg.dat_handle)));
+  argAttrs.push_back(builder.getI64IntegerAttr(static_cast<int64_t>(arg.host_ptr)));
+  argAttrs.push_back(stencilOffsetsAttr);
+  argAttrs.push_back(datShapeAttr);
+  argAttrs.push_back(builder.getI32IntegerAttr(ndim));
 
-  return mlir::DictionaryAttr::get(ctx_, fields);
+  return mlir::ArrayAttr::get(ctx_, argAttrs);
 }
 
 mlir::DenseI64ArrayAttr

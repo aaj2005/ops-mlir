@@ -2,8 +2,8 @@
 #define OPS_MLIR_OPS_FRONTEND_OPS_BUILDER_H
 
 #include "OPSCapture.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
-#include "mlir/IR/ModuleOp.h"
 #include <memory>
 #include <vector>
 
