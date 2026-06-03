@@ -10,7 +10,7 @@ double pi  = 2.0 * asin(1.0);
 //Including main OPS header file, and setting 2D
 #define OPS_2D
 
-#include "ops_wrapper.h"
+#include "ops/OPSWrapper.h"
 #include "./laplace_kernels.h"
 
 int main(int argc, const char** argv)
@@ -64,8 +64,8 @@ int main(int argc, const char** argv)
   // memset
   int full_range[] = {-1, imax+1, -1, jmax+1};
   ops_par_loop(set_zero, "set zero", block, 2, full_range,
-      ops_arg_dat(d_A, 1, S2D_00, "double", OPS_WRITE));
-  ops_par_loop(set_zero, "set zero", block, 2, full_range,
+    ops_arg_dat(d_A, 1, S2D_00, "double", OPS_WRITE));
+   ops_par_loop(set_zero, "set zero", block, 2, full_range,
       ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE));
 
   // set boundary conditions
@@ -87,51 +87,9 @@ int main(int argc, const char** argv)
       ops_arg_dat(d_A, 1, S2D_00, "double", OPS_WRITE),
       ops_arg_idx());
 
-  ops_printf("Jacobi relaxation Calculation: %d x %d mesh\n", imax+2, jmax+2);
+  lower_to_ir();
 
-  int iter = 0;
-
-  ops_par_loop(set_zero, "set zero", block, 2, bottom_range,
-      ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE));
-
-  ops_par_loop(set_zero, "set zero", block, 2, top_range,
-      ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE));
-
-  ops_par_loop(left_bndcon, "left bndcon", block, 2, left_range,
-      ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE),
-      ops_arg_idx());
-
-  ops_par_loop(right_bndcon, "right bndcon", block, 2, right_range,
-      ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE),
-      ops_arg_idx());
-
-  while ( error > tol && iter < iter_max )
-  {
-    int interior_range[] = {0,imax,0,jmax};
-    ops_par_loop(apply_stencil, "apply stencil", block, 2, interior_range,
-        ops_arg_dat(d_A,    1, S2D_5pt, "double", OPS_READ),
-        ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE),
-        ops_arg_reduce(h_err, 1, "double", OPS_MAX));
-    ops_reduction_result(h_err, &error);
-
-    ops_par_loop(copy, "copy", block, 2, interior_range,
-        ops_arg_dat(d_A,    1, S2D_00, "double", OPS_WRITE),
-        ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_READ));
-
-    if(iter % 10 == 0) ops_printf("%5d, %0.6f\n", iter, error);        
-    iter++;
-  }
-
-  ops_printf("%5d, %0.6f\n", iter, error);        
-
-  ops_timing_output(std::cout);
-
-  double err_diff = fabs((100.0*(error/2.421354960840227e-03))-100.0);
-  printf("Total error is within %3.15E %% of the expected error\n",err_diff);
-  if(err_diff < 0.001)
-    printf("This run is considered PASSED\n");
-  else
-    printf("This test is considered FAILED\n");
+  ops_printf("Jacobi relaxation Calculation: %d x %d mesh\n", imax+2, jmax+2); 
 
   //Finalising the OPS library
   free(A);
@@ -139,4 +97,3 @@ int main(int argc, const char** argv)
   //ops_exit();
   return 0;
 }
-

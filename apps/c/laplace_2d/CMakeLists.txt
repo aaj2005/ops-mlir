@@ -2,39 +2,48 @@
 # Laplace 2D Application
 #===============================================================================
 
-# OPS sequential backend library (optional, for Phase 1 execution fallback)
-set(OPS_SEQ_LIB /home/pt/warwick/OPS/ops/c/lib/libops_seq.a)
-set(OPS_INCLUDE_DIR /home/pt/warwick/OPS/ops/c/include)
+set(OPS_ROOT /home/pt/warwick/OPS/ops/c)
 
-add_executable(
-  laplace_2d
-  laplace_2d.cpp
+find_package(OpenMP REQUIRED)
+
+# Collect OPS sequential backend sources from the OPS source tree
+file(GLOB OPS_CORE_SRCS   "${OPS_ROOT}/src/core/*.cpp")
+file(GLOB OPS_SEQ_SRCS    "${OPS_ROOT}/src/sequential/*.cpp")
+file(GLOB OPS_EXTERN_SRCS "${OPS_ROOT}/src/externlib/*.cpp")
+
+# Exclude device-specific and HDF5 files that require CUDA/MPI/HDF5
+list(FILTER OPS_CORE_SRCS   EXCLUDE REGEX "device")
+list(FILTER OPS_EXTERN_SRCS EXCLUDE REGEX "hdf5")
+
+add_library(ops_seq_local STATIC
+  ${OPS_CORE_SRCS}
+  ${OPS_SEQ_SRCS}
+  ${OPS_EXTERN_SRCS}
 )
+target_include_directories(ops_seq_local PUBLIC ${OPS_ROOT}/include)
+target_link_libraries(ops_seq_local PRIVATE OpenMP::OpenMP_CXX)
+target_compile_options(ops_seq_local PRIVATE -fno-PIE)
 
-target_include_directories(
-  laplace_2d
+#===============================================================================
+
+add_executable(laplace_2d laplace_2d.cpp)
+
+target_include_directories(laplace_2d
   PRIVATE
   ${CMAKE_SOURCE_DIR}/include
-  ${OPS_INCLUDE_DIR}
+  ${OPS_ROOT}/include
 )
 
-target_link_libraries(
-  laplace_2d
+target_link_libraries(laplace_2d
   PRIVATE
   MLIROPSFrontend
   MLIROPSDialect
   MLIRIR
   MLIRPass
   MLIRSupport
+  ops_seq_local
+  OpenMP::OpenMP_CXX
+  m
 )
 
-# Link OPS library if available (for Phase 1 fallback execution)
-if(EXISTS "${OPS_SEQ_LIB}")
-  target_link_libraries(laplace_2d PRIVATE ${OPS_SEQ_LIB})
-else()
-  message(STATUS "OPS sequential library not found - JIT execution only")
-endif()
-
-target_link_libraries(laplace_2d PRIVATE m)  # math library
-target_compile_options(laplace_2d PRIVATE -fPIC)
-
+target_link_options(laplace_2d PRIVATE -no-pie)

@@ -13,6 +13,7 @@
 
 #include "ops_lib_core.h"
 #include "ops_frontend/OPSCapture.h"
+#include "ops_frontend/OPSBuilder.h"
 
 #include <array>
 #include <type_traits>
@@ -23,6 +24,9 @@
 // This template overrides the ops_par_loop to capture loop metadata.
 // The captured loops are queued for JIT compilation.
 //===----------------------------------------------------------------------===//
+
+mlir::MLIRContext ctx;
+ops_mlir::OPSBuilder builder(&ctx);
 
 template <typename KernelFn, typename... Args>
 void ops_par_loop(KernelFn kernel,
@@ -47,6 +51,21 @@ void ops_par_loop(KernelFn kernel,
       range,
       packedArgs.data(),
       packedArgs.size());
+}
+
+void lower_to_ir() {
+	auto loops = ops_mlir::CaptureRuntime::instance().queue();
+	auto module = builder.buildModule(loops);
+
+	if (!module) {
+			fprintf(stderr, "Failed to build MLIR module\n");
+			return;
+	}
+
+	// Print the MLIR IR
+  std::cout << "=== OPS.PAR_LOOP MLIR IR ===\n\n";
+  std::string ir = builder.moduleToString(module);
+  std::cout << ir << "\n";
 }
 
 #endif // OPS_WRAPPER_H
