@@ -36,7 +36,7 @@ target_include_directories(laplace_2d
 
 target_link_libraries(laplace_2d
   PRIVATE
-  MLIROPSFrontend
+  OPSRuntime
   MLIROPSDialect
   MLIRIR
   MLIRPass

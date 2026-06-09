@@ -1,18 +1,18 @@
-#include "ops_frontend/OPSCapture.h"
+#include "runtime/JITEngine.h"
 
 namespace ops_mlir {
 
-CaptureRuntime &CaptureRuntime::instance() {
-  static CaptureRuntime rt;
+JITEngine &JITEngine::instance() {
+  static JITEngine rt;
   return rt;
 }
 
-void CaptureRuntime::setFlushCallback(FlushCallback callback) {
+void JITEngine::setFlushCallback(FlushCallback callback) {
   std::lock_guard<std::mutex> lock(mutex_);
   flushCallback_ = std::move(callback);
 }
 
-void CaptureRuntime::enqueueParLoop(std::uintptr_t kernelToken,
+void JITEngine::enqueueParLoop(std::uintptr_t kernelToken,
                                     const char *kernelName, ops_block block,
                                     int dims, const int *range,
                                     const ops_arg *args, std::size_t nargs) {
@@ -21,7 +21,7 @@ void CaptureRuntime::enqueueParLoop(std::uintptr_t kernelToken,
       buildLoopDesc(kernelToken, kernelName, block, dims, range, args, nargs));
 }
 
-void CaptureRuntime::flush() {
+void JITEngine::flush() {
   std::lock_guard<std::mutex> lock(mutex_);
   if (flushCallback_ && !queue_.empty()) {
     flushCallback_(queue_);
@@ -29,7 +29,7 @@ void CaptureRuntime::flush() {
   queue_.clear();
 }
 
-LoopDesc CaptureRuntime::buildLoopDesc(std::uintptr_t kernelToken,
+LoopDesc JITEngine::buildLoopDesc(std::uintptr_t kernelToken,
                                        const char *kernelName, ops_block block,
                                        int dims, const int *range,
                                        const ops_arg *args, std::size_t nargs) {
@@ -49,7 +49,7 @@ LoopDesc CaptureRuntime::buildLoopDesc(std::uintptr_t kernelToken,
   return loop;
 }
 
-ArgDesc CaptureRuntime::buildArgDesc(const ops_arg &arg) {
+ArgDesc JITEngine::buildArgDesc(const ops_arg &arg) {
   ArgDesc desc;
   desc.dim = arg.dim;
   desc.elem_size = arg.elem_size;
@@ -83,7 +83,7 @@ ArgDesc CaptureRuntime::buildArgDesc(const ops_arg &arg) {
   return desc;
 }
 
-DatDesc CaptureRuntime::describeDat(ops_dat dat) {
+DatDesc JITEngine::describeDat(ops_dat dat) {
   DatDesc d;
   d.handle = reinterpret_cast<std::uintptr_t>(dat);
   d.block = reinterpret_cast<std::uintptr_t>(dat->block);
@@ -104,7 +104,7 @@ DatDesc CaptureRuntime::describeDat(ops_dat dat) {
   return d;
 }
 
-StencilDesc CaptureRuntime::describeStencil(ops_stencil stencil) {
+StencilDesc JITEngine::describeStencil(ops_stencil stencil) {
   StencilDesc s;
   s.handle = reinterpret_cast<std::uintptr_t>(stencil);
   s.name = stencil->name ? stencil->name : "";
@@ -118,6 +118,19 @@ StencilDesc CaptureRuntime::describeStencil(ops_stencil stencil) {
     s.stride.assign(stencil->stride, stencil->stride + stencil->dims);
 
   return s;
+}
+
+void JITEngine::compile() {
+  module = builder.buildModule(queue_);
+
+  std::cout << "=== OPS.PAR_LOOP MLIR IR ===\n\n";
+  std::string ir = builder.moduleToString(module);
+  std::cout << ir << "\n";
+}
+
+void JITEngine::execute() {
+  // Placeholder for future execution logic
+  std::cout << "Executing compiled module...\n";
 }
 
 const char *accessToString(int access) {

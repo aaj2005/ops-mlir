@@ -1,4 +1,4 @@
-#include "ops_frontend/OPSBuilder.h"
+#include "runtime/IRBuilder.h"
 #include "Dialect/OPS/OPSDialect.h"
 #include "Dialect/OPS/OPSOps.h"
 #include "mlir/IR/Builders.h"
@@ -9,12 +9,12 @@
 
 namespace ops_mlir {
 
-OPSBuilder::OPSBuilder(mlir::MLIRContext *ctx) : ctx_(ctx) {
+IRBuilder::IRBuilder(mlir::MLIRContext *ctx) : ctx_(ctx) {
   // Register OPS dialect
   ctx_->getOrLoadDialect<ops_mlir::ops::OPSDialect>();
 }
 
-mlir::ModuleOp OPSBuilder::buildModule(const std::vector<LoopDesc> &loops) {
+mlir::ModuleOp IRBuilder::buildModule(const std::vector<LoopDesc> &loops) {
   if (loops.empty()) {
     auto loc = mlir::UnknownLoc::get(ctx_);
     return mlir::ModuleOp::create(loc);
@@ -36,14 +36,14 @@ mlir::ModuleOp OPSBuilder::buildModule(const std::vector<LoopDesc> &loops) {
   return module;
 }
 
-std::string OPSBuilder::moduleToString(mlir::ModuleOp module) {
+std::string IRBuilder::moduleToString(mlir::ModuleOp module) {
   std::string result;
   llvm::raw_string_ostream os(result);
   module.print(os);
   return result;
 }
 
-mlir::Operation *OPSBuilder::buildParLoopOp(const LoopDesc &loop) {
+mlir::Operation *IRBuilder::buildParLoopOp(const LoopDesc &loop) {
   auto loc = mlir::UnknownLoc::get(ctx_);
   mlir::OpBuilder builder(ctx_);
 
@@ -102,7 +102,7 @@ mlir::Operation *OPSBuilder::buildParLoopOp(const LoopDesc &loop) {
   return builder.create(opState);
 }
 
-mlir::Attribute OPSBuilder::buildArgAttr(const ArgDesc &arg, int ndim) {
+mlir::Attribute IRBuilder::buildArgAttr(const ArgDesc &arg, int ndim) {
   auto loc = mlir::UnknownLoc::get(ctx_);
   mlir::OpBuilder builder(ctx_);
 
@@ -145,12 +145,12 @@ mlir::Attribute OPSBuilder::buildArgAttr(const ArgDesc &arg, int ndim) {
 }
 
 mlir::DenseI64ArrayAttr
-OPSBuilder::buildStencilOffsets(const StencilDesc &stencil) {
+IRBuilder::buildStencilOffsets(const StencilDesc &stencil) {
   std::vector<int64_t> offsets(stencil.offsets.begin(), stencil.offsets.end());
   return mlir::DenseI64ArrayAttr::get(ctx_, offsets);
 }
 
-mlir::DenseI64ArrayAttr OPSBuilder::buildDatShape(const DatDesc &dat) {
+mlir::DenseI64ArrayAttr IRBuilder::buildDatShape(const DatDesc &dat) {
   std::vector<int64_t> shape;
   for (int64_t s : dat.size)
     shape.push_back(s);

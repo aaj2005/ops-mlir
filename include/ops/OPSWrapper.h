@@ -11,8 +11,7 @@
 #ifndef OPS_WRAPPER_H
 #define OPS_WRAPPER_H
 
-#include "ops_frontend/OPSBuilder.h"
-#include "ops_frontend/OPSCapture.h"
+#include "runtime/JITEngine.h"
 #include "ops_lib_core.h"
 
 #include <array>
@@ -25,9 +24,6 @@
 // The captured loops are queued for JIT compilation.
 //===----------------------------------------------------------------------===//
 
-mlir::MLIRContext ctx;
-ops_mlir::OPSBuilder builder(&ctx);
-
 template <typename KernelFn, typename... Args>
 void ops_par_loop(KernelFn kernel, const char *name, ops_block block, int dims,
                   int *range, Args... opsArgs) {
@@ -39,23 +35,12 @@ void ops_par_loop(KernelFn kernel, const char *name, ops_block block, int dims,
   auto token =
       static_cast<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(kernel));
 
-  ops_mlir::CaptureRuntime::instance().enqueueParLoop(
+  ops_mlir::JITEngine::instance().enqueueParLoop(
       token, name, block, dims, range, packedArgs.data(), packedArgs.size());
 }
 
-void lower_to_ir() {
-  auto loops = ops_mlir::CaptureRuntime::instance().queue();
-  auto module = builder.buildModule(loops);
-
-  if (!module) {
-    fprintf(stderr, "Failed to build MLIR module\n");
-    return;
-  }
-
-  // Print the MLIR IR
-  std::cout << "=== OPS.PAR_LOOP MLIR IR ===\n\n";
-  std::string ir = builder.moduleToString(module);
-  std::cout << ir << "\n";
+void compile() {
+  ops_mlir::JITEngine::instance().compile();
 }
 
 #endif // OPS_WRAPPER_H
