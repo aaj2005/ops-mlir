@@ -7,7 +7,6 @@ using namespace ops_mlir::ops;
 namespace ops_mlir::ops {
 
 void ParLoopOp::print(OpAsmPrinter &p) {
-  p << "ops.par_loop";
   p.printOptionalAttrDict(getOperation()->getAttrs());
 }
 

@@ -1,9 +1,10 @@
 //===- OPSOps.td - OPS Dialect Operation Definitions ----*- tablegen -*-===//
 //
-// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
-// See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Author: Prakanth Thilakaraj
+// Date: June 2026
 //
+// This file is distributed under the MIT License.
+// See LICENSE.txt for details.
 //===----------------------------------------------------------------------===//
 
 #ifndef OPS_OPS

@@ -10,6 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # MLIR/LLVM Setup
 #===============================================================================
 
+# TODO: Set using config file or environment variables
 # Use the cs325_demo MLIR build
 set(MLIR_BUILD_DIR /home/pt/warwick/cs325_demo/llvm-project/build)
 set(LLVM_BUILD_DIR /home/pt/warwick/cs325_demo/llvm-project/build)
