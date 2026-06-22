@@ -11,6 +11,7 @@
 #define OPS_OPS
 
 include "mlir/IR/OpBase.td"
+include "mlir/IR/AttrTypeBase.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 //===----------------------------------------------------------------------===//
@@ -41,6 +42,36 @@ class OPS_Op<string mnemonic, list<Trait> traits = []>
 }
 
 //===----------------------------------------------------------------------===//
+// OPS Attributes
+//===----------------------------------------------------------------------===//
+
+// Structured descriptor for a single ops.par_loop argument, mirroring
+// ops_mlir::ArgDesc (runtime/Core.h). Replaces the previous positional
+// ArrayAttr encoding produced by IRBuilder::buildArgAttr.
+def OPS_ArgAttr : AttrDef<OPS_Dialect, "Arg"> {
+  let mnemonic = "arg";
+  let summary = "OPS dataset argument descriptor";
+  let description = [{
+    Represents an OPS dataset argument with its kind, access pattern,
+    dataset shape, and stencil offsets.
+  }];
+  let parameters = (ins
+    "int32_t":$kind,
+    "int32_t":$access,
+    "int32_t":$dim,
+    "int32_t":$elem_size,
+    "int64_t":$dat_handle,
+    "int64_t":$host_ptr,
+    "mlir::DenseI64ArrayAttr":$stencil_offsets,
+    "mlir::DenseI64ArrayAttr":$dat_shape,
+    "int32_t":$ndim
+  );
+  let assemblyFormat = "`<` $kind `,` $access `,` $dim `,` $elem_size `,`"
+                       " $dat_handle `,` $host_ptr `,` $stencil_offsets `,`"
+                       " $dat_shape `,` $ndim `>`";
+}
+
+//===----------------------------------------------------------------------===//
 // OPS Operations
 //===----------------------------------------------------------------------===//
 
@@ -62,7 +93,7 @@ def OPS_ParLoopOp : OPS_Op<"par_loop", []> {
     StrAttr:$kernel_name,
     I32Attr:$dims,
     DenseI64ArrayAttr:$range,
-    ArrayAttr:$args,
+    TypedArrayAttrBase<OPS_ArgAttr, "array of OPS dataset argument descriptors">:$args,
     OptionalAttr<I32Attr>:$block_dims
   );
 

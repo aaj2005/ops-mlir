@@ -55,6 +55,7 @@ ArgDesc JITEngine::buildArgDesc(const ops_arg &arg) {
   desc.elem_size = arg.elem_size;
   desc.access = arg.acc;
   desc.optional = arg.opt;
+  // TODO: Casting pointers to uintptr_t is not portable. We should use a better way to represent pointers in MLIR attributes.
   desc.dat_handle = reinterpret_cast<std::uintptr_t>(arg.dat);
   desc.stencil_handle = reinterpret_cast<std::uintptr_t>(arg.stencil);
   desc.host_ptr = reinterpret_cast<std::uintptr_t>(arg.data);

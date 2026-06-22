@@ -1,24 +1,22 @@
 #include "Dialect/OPS/OPSDialect.h"
 #include "Dialect/OPS/OPSOps.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
 using namespace ops_mlir::ops;
 
 #include "Dialect/OPS/OPSDialect.cpp.inc"
 
+#define GET_ATTRDEF_CLASSES
+#include "Dialect/OPS/OPSOpsAttrs.cpp.inc"
+
 namespace ops_mlir::ops {
 
-void OPSDialect::initialize() { addOperations<ParLoopOp>(); }
-
-mlir::Attribute OPSDialect::parseAttribute(mlir::DialectAsmParser &parser,
-                                           mlir::Type type) const {
-  return nullptr;
-}
-
-void OPSDialect::printAttribute(mlir::Attribute attr,
-                                mlir::DialectAsmPrinter &os) const {
-  os << attr;
+void OPSDialect::initialize() {
+  addOperations<ParLoopOp>();
+  addAttributes<ArgAttr>();
 }
 
 mlir::Type OPSDialect::parseType(mlir::DialectAsmParser &parser) const {

@@ -7,6 +7,9 @@
 #include "mlir/IR/Location.h"
 #include "llvm/Support/raw_ostream.h"
 
+
+// TODO: Casting pointers to int64_t is not portable. We should use a better way to represent pointers in MLIR attributes.
+
 namespace ops_mlir {
 
 IRBuilder::IRBuilder(mlir::MLIRContext *ctx) : ctx_(ctx) {
@@ -125,23 +128,11 @@ mlir::Attribute IRBuilder::buildArgAttr(const ArgDesc &arg, int ndim) {
     datShape.push_back(d);
   auto datShapeAttr = mlir::DenseI64ArrayAttr::get(ctx_, datShape);
 
-  // Create argument descriptor as an array attribute
-  // Order: kind, access, dim, elem_size, dat_ptr, host_ptr, stencil_offsets,
-  // dat_shape, ndim
-  mlir::SmallVector<mlir::Attribute> argAttrs;
-  argAttrs.push_back(builder.getI32IntegerAttr(static_cast<int32_t>(arg.kind)));
-  argAttrs.push_back(builder.getI32IntegerAttr(arg.access));
-  argAttrs.push_back(builder.getI32IntegerAttr(arg.dim));
-  argAttrs.push_back(builder.getI32IntegerAttr(arg.elem_size));
-  argAttrs.push_back(
-      builder.getI64IntegerAttr(static_cast<int64_t>(arg.dat_handle)));
-  argAttrs.push_back(
-      builder.getI64IntegerAttr(static_cast<int64_t>(arg.host_ptr)));
-  argAttrs.push_back(stencilOffsetsAttr);
-  argAttrs.push_back(datShapeAttr);
-  argAttrs.push_back(builder.getI32IntegerAttr(ndim));
-
-  return mlir::ArrayAttr::get(ctx_, argAttrs);
+  return ops_mlir::ops::ArgAttr::get(
+      ctx_, static_cast<int32_t>(arg.kind), arg.access, arg.dim,
+      arg.elem_size, static_cast<int64_t>(arg.dat_handle),
+      static_cast<int64_t>(arg.host_ptr), stencilOffsetsAttr, datShapeAttr,
+      ndim);
 }
 
 mlir::DenseI64ArrayAttr
