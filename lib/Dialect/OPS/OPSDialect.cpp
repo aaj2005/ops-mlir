@@ -17,6 +17,8 @@ namespace ops_mlir::ops {
 void OPSDialect::initialize() {
   addOperations<ParLoopOp>();
   addAttributes<ArgAttr>();
+  addAttributes<DatAttr>();
+  addAttributes<StencilAttr>();
 }
 
 mlir::Type OPSDialect::parseType(mlir::DialectAsmParser &parser) const {
