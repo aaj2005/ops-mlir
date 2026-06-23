@@ -32,8 +32,9 @@ public:
   const std::vector<LoopDesc> &queue() const { return queue_; }
 
 private:
-  JITEngine() = default;
-  
+  JITEngine();
+  ~JITEngine();
+
   mlir::MLIRContext ctx;
   mlir::ModuleOp module;
   IRBuilder builder{&ctx};
@@ -46,6 +47,11 @@ private:
 
   DatDesc describeDat(ops_dat dat);
   StencilDesc describeStencil(ops_stencil stencil);
+
+  /// Case B: hand the textual IR to xdsl_impl/ops_to_xdsl.py running in
+  /// this same process (so the captured ops.dat/ops.stencil pointers
+  /// embedded in `ir` are still live), and return the lowered stencil IR.
+  std::string runXdslLowering(const std::string &ir);
 
 private:
   std::mutex mutex_;
