@@ -1,5 +1,7 @@
 #include "runtime/JITEngine.h"
-#include "Python.h"
+#include "Dialect/stencil/StencilDialect.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "passes/OPSToStencil.h"
 
 #include <iostream>
 
@@ -11,21 +13,13 @@ JITEngine &JITEngine::instance() {
 }
 
 JITEngine::JITEngine() {
-  if (!Py_IsInitialized()) {
-    Py_Initialize();
-  }
-
-  // Make xdsl_impl/ops_to_xdsl.py importable. OPS_XDSL_DIR is injected by
-  // lib/runtime/CMakeLists.txt as the absolute path to xdsl_impl/.
-  std::string setup = "import sys\nsys.path.insert(0, '" OPS_XDSL_DIR "')\n";
-  PyRun_SimpleString(setup.c_str());
+  // Needed by runStencilLowering()'s OPSToStencil pass output (func.func +
+  // stencil.*), built on the same ctx that already holds the OPS dialect.
+  ctx.getOrLoadDialect<mlir::stencil::StencilDialect>();
+  ctx.getOrLoadDialect<mlir::func::FuncDialect>();
 }
 
-JITEngine::~JITEngine() {
-  if (Py_IsInitialized()) {
-    Py_FinalizeEx();
-  }
-}
+JITEngine::~JITEngine() = default;
 
 void JITEngine::setFlushCallback(FlushCallback callback) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -132,57 +126,22 @@ StencilDesc JITEngine::describeStencil(ops_stencil stencil) {
   return s;
 }
 
-std::string JITEngine::runXdslLowering(const std::string &ir) {
-  PyGILState_STATE gstate = PyGILState_Ensure();
+std::string JITEngine::runStencilLowering() {
+  if (!module)
+    return {};
+
+  auto clone = mlir::cast<mlir::ModuleOp>(module->clone());
+  convertOPSParLoopsToStencil(clone);
+
   std::string result;
-
-  PyObject *mod = PyImport_ImportModule("ops_to_xdsl");
-  if (!mod) {
-    PyErr_Print();
-    PyGILState_Release(gstate);
-    return result;
-  }
-
-  PyObject *func = PyObject_GetAttrString(mod, "convert_ir_text");
-  Py_DECREF(mod);
-  if (!func || !PyCallable_Check(func)) {
-    PyErr_Print();
-    Py_XDECREF(func);
-    PyGILState_Release(gstate);
-    return result;
-  }
-
-  // unsafe_dereference=True: this call happens synchronously inside
-  // compile(), before any captured ops_dat/ops_stencil buffer referenced
-  // by `ir` can go out of scope, so dereferencing their pointers here is
-  // safe (see xdsl_impl/ops_runtime.py's SAFETY note).
-  // NB: "p" (bool) is a PyArg_ParseTuple format code, not a Py_BuildValue
-  // one -- use "i" and let Python's truthiness handle it.
-  PyObject *args = Py_BuildValue("(si)", ir.c_str(), 1);
-  if (!args) {
-    PyErr_Print();
-    Py_DECREF(func);
-    PyGILState_Release(gstate);
-    return result;
-  }
-  PyObject *pyResult = PyObject_CallObject(func, args);
-  Py_DECREF(args);
-  Py_DECREF(func);
-
-  if (!pyResult) {
-    PyErr_Print();
-    PyGILState_Release(gstate);
-    return result;
-  }
-
-  if (const char *text = PyUnicode_AsUTF8(pyResult)) {
-    result = text;
+  if (mlir::failed(clone.verify())) {
+    std::cerr << "OPSToStencil: verification failed\n";
   } else {
-    PyErr_Print();
+    llvm::raw_string_ostream os(result);
+    clone.print(os);
   }
-  Py_DECREF(pyResult);
 
-  PyGILState_Release(gstate);
+  clone->erase();
   return result;
 }
 
@@ -192,10 +151,10 @@ void JITEngine::compile() {
   std::string ir = builder.moduleToString(module);
   std::cout << "=== OPS.PAR_LOOP MLIR IR ===\n\n" << ir << "\n";
 
-  std::string lowered = runXdslLowering(ir);
-  if (!lowered.empty()) {
-    std::cout << "=== LOWERED STENCIL IR (xDSL, in-process) ===\n\n"
-              << lowered << "\n";
+  std::string stencilIr = runStencilLowering();
+  if (!stencilIr.empty()) {
+    std::cout << "=== LOWERED STENCIL IR (C++ OPSToStencil pass) ===\n\n"
+              << stencilIr << "\n";
   }
 }
 
