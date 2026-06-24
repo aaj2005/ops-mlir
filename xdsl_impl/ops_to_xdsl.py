@@ -5,27 +5,46 @@ Usage:
     python xdsl_impl/ops_to_xdsl.py xdsl_impl/laplace_sample.mlir
     python xdsl_impl/ops_to_xdsl.py xdsl_impl/laplace_sample.mlir --unsafe-dereference-pointers
 
-Each ops.par_loop is rewritten into, per Dat argument, a stencil.alloc/
-stencil.load (for READ/RW dats) feeding a single stencil.apply, whose body
-issues a stencil.access per stencil-point offset and a placeholder call to
-the original kernel (declared as an external func.func, since the captured
-ops.par_loop carries only a kernel name/pointer, not the kernel body), then
-stencil.store of the apply's results into the WRITE/RW/INC dats' fields.
+Each ops.par_loop is rewritten into, per Dat argument:
+
+    %p = arith.constant <dat.data> : i64
+    %ptr = llvm.inttoptr %p : i64 to !llvm.ptr
+    %field = stencil.external_load %ptr : !llvm.ptr -> !stencil.field<...>
+
+instead of a synthetic stencil.alloc -- the dat's real host pointer
+(captured byte-for-byte from ops_dat::data, see OPSOps.td's OPS_DatAttr)
+flows into the IR itself as an inttoptr'd value, so `%field` is genuinely
+backed by that address as far as the IR is concerned. This is pure value
+construction (materializing an integer, then a pointer type around it) --
+it does not dereference anything, so it is safe to do unconditionally,
+even when lowering a `.mlir` file dumped by a since-exited process: the
+*pointer value* round-trips faithfully, only *reading through* it would
+be unsafe (and nothing here does that for the dat buffers).
+
+%field then feeds stencil.load (for READ/RW dats) into a single
+stencil.apply, whose body issues a stencil.access per stencil-point
+offset and a placeholder call to the original kernel (declared as an
+external func.func, since the captured ops.par_loop carries only a
+kernel name/pointer, not the kernel body), then stencil.store of the
+apply's results back into the WRITE/RW/INC dats' (same, externally
+loaded) fields.
 
 Gbl/Idx/Reduce arguments (argtype != DAT) are not modeled (no field/temp
 backs them) and are simply omitted from the generated kernel call's
 argument list.
 
-Stencil access pattern: OPS_StencilAttr only carries a *pointer* to the
-point-offset array (mirroring ops_stencil_core::stencil exactly -- see
-OPSOps.td), not the offsets themselves, so this structural converter
-cannot recover them from the textual IR alone and defaults every dat to a
-single (0, ..., 0) access point. Passing --unsafe-dereference-pointers
-opts into dereferencing that pointer via ops_runtime.bind_stencil_offsets
-to recover the real pattern -- valid ONLY when this script runs in the
-same process that captured the IR (see ops_runtime.py's SAFETY note); it
-is not valid for a `.mlir` file dumped by a since-exited process, which is
-the normal way to invoke this script from the command line.
+Stencil access pattern: unlike the dat pointer, OPS_StencilAttr's point
+offsets are a *compile-time* shape decision (which/how-many stencil.access
+ops to emit, and at which literal relative offsets) baked into the IR as
+immediates, not a runtime value flowing through it -- mirroring how a real
+stencil compiler treats a statically-declared ops_decl_stencil pattern.
+Recovering it does require *reading* the pattern, via the raw `int*`
+OPS_StencilAttr carries (mirroring ops_stencil_core::stencil exactly), so
+that part genuinely dereferences memory and is gated behind
+--unsafe-dereference-pointers / ops_runtime.bind_stencil_offsets -- valid
+ONLY when this script runs in the same process that captured the IR (see
+ops_runtime.py's SAFETY note). Without it, every dat defaults to a single
+(0, ..., 0) access point.
 """
 
 import sys
@@ -33,8 +52,8 @@ from pathlib import Path
 
 from xdsl.builder import Builder, InsertPoint
 from xdsl.context import Context
-from xdsl.dialects import func, stencil
-from xdsl.dialects.builtin import Builtin, ModuleOp, f64
+from xdsl.dialects import arith, func, llvm, stencil
+from xdsl.dialects.builtin import Builtin, IntegerAttr, ModuleOp, f64, i64
 from xdsl.ir import Block, Region
 from xdsl.parser import Parser
 from xdsl.printer import Printer
@@ -63,6 +82,17 @@ def range_bounds(rng: list[int], ndim: int) -> list[tuple[int, int]]:
     return [(rng[2 * i], rng[2 * i + 1]) for i in range(ndim)]
 
 
+def external_field(builder: Builder, dat: DatAttr, field_type: stencil.FieldType) -> stencil.ExternalLoadOp:
+    """Materialize dat.data (a raw host pointer, captured verbatim from
+    ops_dat::data) as IR: arith.constant -> llvm.inttoptr -> stencil's
+    external_load, so the field's provenance is a real, printable,
+    re-parseable part of the IR instead of a Python-side side-table.
+    """
+    ptr_int = builder.insert(arith.ConstantOp(IntegerAttr(dat.data.data, i64)))
+    ptr = builder.insert(llvm.IntToPtrOp(ptr_int))
+    return builder.insert(stencil.ExternalLoadOp(ptr, field_type))
+
+
 def convert_par_loop(
     op: ParLoopOp, builder: Builder, module: ModuleOp, *, unsafe_dereference: bool
 ) -> None:
@@ -73,19 +103,19 @@ def convert_par_loop(
 
     loads: list[tuple[ArgAttr, stencil.LoadOp]] = []
     writes: list[ArgAttr] = []
-    fields: dict[int, stencil.AllocOp] = {}
+    fields: dict[int, stencil.ExternalLoadOp] = {}
     for arg in dat_args:
         dat = arg.dat
         bounds = field_bounds(dat)
         field_type = stencil.FieldType(bounds, f64)
-        alloc = builder.insert(stencil.AllocOp(result_types=[field_type]))
-        fields[id(arg)] = alloc
+        field = external_field(builder, dat, field_type)
+        fields[id(arg)] = field
 
         access = arg.acc.data
         if access in (Access.READ, Access.RW):
             ix = stencil.IndexAttr.get(*(b[0] for b in bounds))
             ux = stencil.IndexAttr.get(*(b[1] for b in bounds))
-            load = builder.insert(stencil.LoadOp.get(alloc, lb=ix, ub=ux))
+            load = builder.insert(stencil.LoadOp.get(field, lb=ix, ub=ux))
             loads.append((arg, load))
         if access in (Access.WRITE, Access.RW, Access.INC):
             writes.append(arg)
@@ -144,17 +174,24 @@ def convert_ir_text(text: str, unsafe_dereference: bool = False) -> str:
     """String-in/string-out entry point for embedding (see
     lib/runtime/JITEngine.cpp::runXdslLowering). Unlike main(), this never
     touches the filesystem or stdout/stderr -- the caller owns the IR
-    string and the result string. `unsafe_dereference=True` is only safe
-    when called from the same process that captured the IR (see
-    ops_runtime.py's SAFETY note); JITEngine calls it from inside
-    compile(), before any captured ops_dat/ops_stencil buffer can go out
-    of scope, so that precondition holds there.
+    string and the result string.
+
+    `unsafe_dereference=True` only affects whether the real stencil access
+    pattern is recovered by dereferencing OPS_StencilAttr's offsets
+    pointer (see module docstring) -- it is only safe when called from the
+    same process that captured the IR (see ops_runtime.py's SAFETY note);
+    JITEngine calls this from inside compile(), before any captured
+    ops_dat/ops_stencil buffer can go out of scope, so that precondition
+    holds there. The dat buffer pointers themselves are always safe to
+    materialize into the IR regardless of this flag (see external_field).
     """
     ctx = Context()
     ctx.load_dialect(Builtin)
     ctx.load_dialect(OPS)
     ctx.load_dialect(stencil.Stencil)
     ctx.load_dialect(func.Func)
+    ctx.load_dialect(arith.Arith)
+    ctx.load_dialect(llvm.LLVM)
 
     module = Parser(ctx, text).parse_module()
     convert_module(module, unsafe_dereference=unsafe_dereference)
