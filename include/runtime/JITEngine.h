@@ -48,10 +48,10 @@ private:
   DatDesc describeDat(ops_dat dat);
   StencilDesc describeStencil(ops_stencil stencil);
 
-  /// Phase 0/1 of the pure-LLVM lowering plan (see lib/passes/OPSToStencil.cpp):
-  /// run the real C++ ops.par_loop -> func.func+stencil.* pass on a clone of
-  /// `module`, verify it, and return its textual form (empty on failure).
-  std::string runStencilLowering();
+  /// Case B: hand the textual IR to xdsl_impl/ops_to_xdsl.py running in
+  /// this same process (so the captured ops.dat/ops.stencil pointers
+  /// embedded in `ir` are still live), and return the lowered stencil IR.
+  std::string runXdslLowering(const std::string &ir);
 
 private:
   std::mutex mutex_;
