@@ -1,0 +1,49 @@
+#===============================================================================
+# Laplace 2D Application
+#===============================================================================
+
+set(OPS_ROOT /home/pt/warwick/OPS/ops/c)
+
+find_package(OpenMP REQUIRED)
+
+# Collect OPS sequential backend sources from the OPS source tree
+file(GLOB OPS_CORE_SRCS   "${OPS_ROOT}/src/core/*.cpp")
+file(GLOB OPS_SEQ_SRCS    "${OPS_ROOT}/src/sequential/*.cpp")
+file(GLOB OPS_EXTERN_SRCS "${OPS_ROOT}/src/externlib/*.cpp")
+
+# Exclude device-specific and HDF5 files that require CUDA/MPI/HDF5
+list(FILTER OPS_CORE_SRCS   EXCLUDE REGEX "device")
+list(FILTER OPS_EXTERN_SRCS EXCLUDE REGEX "hdf5")
+
+add_library(ops_seq_local STATIC
+  ${OPS_CORE_SRCS}
+  ${OPS_SEQ_SRCS}
+  ${OPS_EXTERN_SRCS}
+)
+target_include_directories(ops_seq_local PUBLIC ${OPS_ROOT}/include)
+target_link_libraries(ops_seq_local PRIVATE OpenMP::OpenMP_CXX)
+target_compile_options(ops_seq_local PRIVATE -fno-PIE)
+
+#===============================================================================
+
+add_executable(laplace_2d laplace_2d.cpp)
+
+target_include_directories(laplace_2d
+  PRIVATE
+  ${CMAKE_SOURCE_DIR}/include
+  ${OPS_ROOT}/include
+)
+
+target_link_libraries(laplace_2d
+  PRIVATE
+  OPSRuntime
+  MLIROPSDialect
+  MLIRIR
+  MLIRPass
+  MLIRSupport
+  ops_seq_local
+  OpenMP::OpenMP_CXX
+  m
+)
+
+target_link_options(laplace_2d PRIVATE -no-pie)
