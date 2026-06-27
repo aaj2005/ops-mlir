@@ -152,13 +152,7 @@ std::string JITEngine::runXdslLowering(const std::string &ir) {
     return result;
   }
 
-  // unsafe_dereference=True: this call happens synchronously inside
-  // compile(), before any captured ops_dat/ops_stencil buffer referenced
-  // by `ir` can go out of scope, so dereferencing their pointers here is
-  // safe (see xdsl_impl/ops_runtime.py's SAFETY note).
-  // NB: "p" (bool) is a PyArg_ParseTuple format code, not a Py_BuildValue
-  // one -- use "i" and let Python's truthiness handle it.
-  PyObject *args = Py_BuildValue("(si)", ir.c_str(), 1);
+  PyObject *args = Py_BuildValue("(s)", ir.c_str());
   if (!args) {
     PyErr_Print();
     Py_DECREF(func);
