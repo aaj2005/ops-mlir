@@ -41,7 +41,7 @@ from xdsl.builder import Builder, InsertPoint
 from xdsl.context import Context
 from xdsl.dialects import func, stencil
 from xdsl.dialects.builtin import Builtin, IndexType, IntegerAttr, ModuleOp, f64
-from xdsl.ir import Block, Region
+from xdsl.ir import Block, Region, SSAValue
 from xdsl.parser import Parser
 from xdsl.printer import Printer
 
@@ -95,25 +95,21 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
     block = fn.body.block
     builder = Builder(InsertPoint.at_end(block))
 
-    loads: list[tuple[ArgAttr, stencil.LoadOp]] = []
-    writes: list[tuple[ArgAttr, object]] = []  # (arg, field block-arg)
+    reads: list[SSAValue] = []
+    writes: list[SSAValue] = []  # field block-arg
     for arg, field in zip(dat_args, block.args):
         access = arg.acc.data
         if access in (Access.READ, Access.RW):
-            bounds = field_bounds(arg.dat)
-            ix = stencil.IndexAttr.get(*(b[0] for b in bounds))
-            ux = stencil.IndexAttr.get(*(b[1] for b in bounds))
-            load = builder.insert(stencil.LoadOp.get(field, lb=ix, ub=ux))
-            loads.append((arg, load))
+            reads.append(field)
         if access in (Access.WRITE, Access.RW, Access.INC):
-            writes.append((arg, field))
+            writes.append(field)
 
-    body_args = [load.res.type for _, load in loads]
+    body_args = field_types
     apply_block = Block(arg_types=body_args)
     block_builder = Builder(InsertPoint.at_end(apply_block))
 
     access_results = []
-    for (arg, _load), block_arg in zip(loads, apply_block.args):
+    for block_arg in reads:
         for point in stencil_points(ndim):
             access = block_builder.insert(stencil.AccessOp(block_arg, point))
             access_results.append(access.res)
@@ -139,19 +135,15 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
     kernel = block_builder.insert(func.CallOp(kernel_name, call_args, [f64] * num_results))
     block_builder.insert(stencil.ReturnOp.get(list(kernel.results)))
 
-    apply = builder.insert(
-        stencil.ApplyOp(
-            args=[load for _, load in loads],
-            body=Region(apply_block),
-            result_types=[stencil.TempType(field_bounds(w.dat), f64) for w, _f in writes]
-            or [stencil.TempType(apply_bounds.bounds(), f64)],
-            bounds=apply_bounds,
+    # Create ApplyOp in buffer semantic form
+    builder.insert(
+        stencil.ApplyOp.build(
+            operands=[reads, writes, []], # reduction operands empty for now
+            regions=[Region([apply_block])],
+            result_types=[[]], # buffer semantic does not return results
+            properties={"bounds": apply_bounds},
         )
     )
-
-    for (w, field), res in zip(writes, apply.res):
-        store_bounds = stencil.StencilBoundsAttr(field_bounds(w.dat))
-        builder.insert(stencil.StoreOp(res, field, store_bounds))
 
     builder.insert(func.ReturnOp())
     return fn
