@@ -2,8 +2,6 @@
 # Laplace 2D Application
 #===============================================================================
 
-set(OPS_ROOT /home/pt/warwick/OPS/ops/c)
-
 find_package(OpenMP REQUIRED)
 
 # Collect OPS sequential backend sources from the OPS source tree

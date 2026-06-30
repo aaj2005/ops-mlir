@@ -46,7 +46,7 @@ from xdsl.parser import Parser
 from xdsl.printer import Printer
 
 sys.path.insert(0, str(Path(__file__).parent))
-from ops_dialect import OPS, ArgAttr, ArgType, Access, DatAttr, ParLoopOp  # noqa: E402
+from ops_dialect import OPS, ArgAttr, ArgType, Access, DatAttr, ParLoopOp
 
 
 def field_bounds(dat: DatAttr) -> list[tuple[int, int]]:
