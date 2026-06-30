@@ -10,12 +10,30 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # MLIR/LLVM Setup
 #===============================================================================
 
-# TODO: Set using config file or environment variables
-# Use the cs325_demo MLIR build
-set(MLIR_BUILD_DIR /home/pt/warwick/cs325_demo/llvm-project/build)
-set(LLVM_BUILD_DIR /home/pt/warwick/cs325_demo/llvm-project/build)
-set(LLVM_SOURCE_DIR /home/pt/warwick/cs325_demo/llvm-project/llvm)
-set(MLIR_SOURCE_DIR /home/pt/warwick/cs325_demo/llvm-project/mlir)
+# Paths are read from environment variables. See README.md for setup
+# instructions (source env_setup or export these yourself before running cmake).
+if(NOT DEFINED ENV{MLIR_BUILD_DIR})
+  message(FATAL_ERROR "Environment variable MLIR_BUILD_DIR is not set. See README.md.")
+endif()
+if(NOT DEFINED ENV{LLVM_BUILD_DIR})
+  message(FATAL_ERROR "Environment variable LLVM_BUILD_DIR is not set. See README.md.")
+endif()
+if(NOT DEFINED ENV{LLVM_SOURCE_DIR})
+  message(FATAL_ERROR "Environment variable LLVM_SOURCE_DIR is not set. See README.md.")
+endif()
+if(NOT DEFINED ENV{MLIR_SOURCE_DIR})
+  message(FATAL_ERROR "Environment variable MLIR_SOURCE_DIR is not set. See README.md.")
+endif()
+if(NOT DEFINED ENV{OPS_ROOT})
+  message(FATAL_ERROR "Environment variable OPS_ROOT is not set. See README.md.")
+endif()
+
+set(MLIR_BUILD_DIR $ENV{MLIR_BUILD_DIR})
+set(LLVM_BUILD_DIR $ENV{LLVM_BUILD_DIR})
+set(LLVM_SOURCE_DIR $ENV{LLVM_SOURCE_DIR})
+set(MLIR_SOURCE_DIR $ENV{MLIR_SOURCE_DIR})
+set(OPS_ROOT $ENV{OPS_ROOT})
+set(OPS_INCLUDE_DIR ${OPS_ROOT}/include)
 
 # Find MLIR and LLVM packages
 find_package(MLIR REQUIRED CONFIG
@@ -33,11 +51,6 @@ list(APPEND CMAKE_MODULE_PATH "${MLIR_BUILD_DIR}/cmake/modules")
 include(AddLLVM)
 include(AddMLIR)
 include(TableGen)
-
-#===============================================================================
-# OPS Library Setup
-#===============================================================================
-set(OPS_INCLUDE_DIR /home/pt/warwick/OPS/ops/c/include)
 
 #===============================================================================
 # Project Structure
