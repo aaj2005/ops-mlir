@@ -71,6 +71,23 @@ make -j$(nproc)
 CMake configuration will fail with a clear error if any of the five
 environment variables above are not set.
 
+## 5. Use xDSL Fork
+Needed for OPS reductions.
+
+```bash
+# Remove standard xDSL (if needed)
+pip uninstall xdsl
+
+git clone git@github.com:Archii0/xdsl.git
+# you may need to change to the branch "stencil-reduce"
+# git checkout stencil-reduce
+
+pip install -e path/to/xdsl-fork
+
+```
+
+TLDR - only partial reduction support is upstreamed into xDSL, waiting on stencil dialect stakeholders to validate my full changes still...
+
 ## Usage
 
 Run the 2D Laplace example:
