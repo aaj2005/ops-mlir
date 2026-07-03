@@ -11,6 +11,17 @@
 
 namespace ops_mlir {
 
+enum class Backend { Sequential, OpenMP, CUDA };
+
+// TODO: Backend selection logic
+constexpr Backend kDefaultBackend = Backend::Sequential;
+
+struct XdslResult {
+  bool success = false;
+  std::string ir;      // populated on success
+  std::string error;   // populated on failure
+};
+
 class JITEngine {
 public:
   using FlushCallback = std::function<void(const std::vector<LoopDesc> &)>;
@@ -51,7 +62,9 @@ private:
   /// Case B: hand the textual IR to xdsl_impl/ops_to_xdsl.py running in
   /// this same process (so the captured ops.dat/ops.stencil pointers
   /// embedded in `ir` are still live), and return the lowered stencil IR.
-  std::string runXdslLowering(const std::string &ir);
+  XdslResult runXdslLowering(const std::string &ir);
+
+  void runBackendLowering(mlir::ModuleOp module, Backend backend)
 
 private:
   std::mutex mutex_;

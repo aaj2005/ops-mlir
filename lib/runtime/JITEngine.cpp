@@ -19,6 +19,13 @@ JITEngine::JITEngine() {
   // lib/runtime/CMakeLists.txt as the absolute path to xdsl_impl/.
   std::string setup = "import sys\nsys.path.insert(0, '" OPS_XDSL_DIR "')\n";
   PyRun_SimpleString(setup.c_str());
+
+  // Register needed dialects - will need to add more later
+  // TODO: add all required dialects
+  ctx.getOrLoadDialect<mlir::func::FuncDialect>();
+  ctx.getOrLoadDialect<mlir::arith::ArithDialect>();
+  ctx.getOrLoadDialect<mlir::memref::MemRefDialect>();
+  ctx.getOrLoadDialect<mlir::scf::SCFDialect>();
 }
 
 JITEngine::~JITEngine() {
@@ -132,13 +139,31 @@ StencilDesc JITEngine::describeStencil(ops_stencil stencil) {
   return s;
 }
 
-std::string JITEngine::runXdslLowering(const std::string &ir) {
+static std::string fetchPyError() {
+  if (!PyErr_Occurred())
+    return "unknown Python error";
+  PyObject *type, *value, *tb;
+  PyErr_Fetch(&type, &value, &tb);
+  PyErr_NormalizeException(&type, &value, &tb);
+  std::string msg = "unknown Python error";
+  if (value) {
+    PyObject *str = PyObject_Str(value);
+    if (str) {
+      if (const char *s = PyUnicode_AsUTF8(str)) msg = s;
+      Py_DECREF(str);
+    }
+  }
+  Py_XDECREF(type); Py_XDECREF(value); Py_XDECREF(tb);
+  return msg;
+}
+
+XdslResult JITEngine::runXdslLowering(const std::string &ir) {
   PyGILState_STATE gstate = PyGILState_Ensure();
-  std::string result;
+  XdslResult result;
 
   PyObject *mod = PyImport_ImportModule("ops_to_xdsl");
   if (!mod) {
-    PyErr_Print();
+    result.error = fetchPyError();
     PyGILState_Release(gstate);
     return result;
   }
@@ -146,7 +171,7 @@ std::string JITEngine::runXdslLowering(const std::string &ir) {
   PyObject *func = PyObject_GetAttrString(mod, "convert_ir_text");
   Py_DECREF(mod);
   if (!func || !PyCallable_Check(func)) {
-    PyErr_Print();
+    result.error = fetchPyError();
     Py_XDECREF(func);
     PyGILState_Release(gstate);
     return result;
@@ -154,7 +179,7 @@ std::string JITEngine::runXdslLowering(const std::string &ir) {
 
   PyObject *args = Py_BuildValue("(s)", ir.c_str());
   if (!args) {
-    PyErr_Print();
+    result.error = fetchPyError();
     Py_DECREF(func);
     PyGILState_Release(gstate);
     return result;
@@ -164,20 +189,46 @@ std::string JITEngine::runXdslLowering(const std::string &ir) {
   Py_DECREF(func);
 
   if (!pyResult) {
-    PyErr_Print();
+    result.error = fetchPyError();
     PyGILState_Release(gstate);
     return result;
   }
 
   if (const char *text = PyUnicode_AsUTF8(pyResult)) {
-    result = text;
+    result.ir = text;
+    result.success = true;
   } else {
-    PyErr_Print();
+    result.error = fetchPyError();
   }
   Py_DECREF(pyResult);
 
   PyGILState_Release(gstate);
   return result;
+}
+
+void JITEngine::runBackendLowering(mlir::ModuleOp module, Backend backend) {
+  mlir::PassManager pm(&ctx);
+
+  switch (backend) {
+    case Backend::Sequential:
+      // TODO: add passes
+      break;
+    case Backend::OpenMP:
+      // TODO: add passes
+      break;
+    case Backend::CUDA:
+      // TODO: add passes
+      break;
+  }
+
+  if (mlir::failed(pm.run(module))) {
+    llvm::errs() << "backend lowering failed for module\n"; 
+    return;
+  }
+
+  std::cout << "=== BACKEND-LOWERED MLIR IR ===\n\n";
+  module.print(llvm::outs());
+  std::cout << "\n";
 }
 
 void JITEngine::compile() {
@@ -186,11 +237,24 @@ void JITEngine::compile() {
   std::string ir = builder.moduleToString(module);
   std::cout << "=== OPS.PAR_LOOP MLIR IR ===\n\n" << ir << "\n";
 
-  std::string lowered = runXdslLowering(ir);
-  if (!lowered.empty()) {
-    std::cout << "=== LOWERED STENCIL IR (xDSL, in-process) ===\n\n"
-              << lowered << "\n";
+  XdslResult lowered = runXdslLowering(ir);
+  if (!lowered.success) {
+    llvm::errs() << "xDSL lowering failed: " <<  lowered.error << "\n";
+    return;
   }
+  
+  std::cout << "=== LOWERED STENCIL IR (xDSL, in-process) ===\n\n"
+            << lowered.ir << "\n";
+
+  mlir::OwningOpRef<mlir::ModuleOp> loweredModule = 
+    mlir::parseSourceString<mlir::ModuleOp>(lowered.ir, &ctx);
+
+  if (!loweredModule) {
+    llvm::errs() << "Failed to parse xDSL output as MLIR\n";
+    return;
+  }
+
+  runBackendLowering(*loweredModule,  kDefaultBackend);
 }
 
 void JITEngine::execute() {
