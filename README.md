@@ -78,7 +78,7 @@ Needed for OPS reductions.
 # Remove standard xDSL (if needed)
 pip uninstall xdsl
 
-git clone git@github.com:Archii0/xdsl.git
+git clone https://github.com:Archii0/xdsl.git
 # you may need to change to the branch "stencil-reduce"
 # git checkout stencil-reduce
 
