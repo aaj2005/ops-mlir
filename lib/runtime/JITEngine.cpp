@@ -1,4 +1,5 @@
 #include "runtime/JITEngine.h"
+#include "runtime/BackendPipeline.h"
 #include "Python.h"
 
 #include <iostream>
@@ -21,11 +22,18 @@ JITEngine::JITEngine() {
   PyRun_SimpleString(setup.c_str());
 
   // Register needed dialects - will need to add more later
+  mlir::registerAllPasses();
   // TODO: add all required dialects
   ctx.getOrLoadDialect<mlir::func::FuncDialect>();
   ctx.getOrLoadDialect<mlir::arith::ArithDialect>();
   ctx.getOrLoadDialect<mlir::memref::MemRefDialect>();
   ctx.getOrLoadDialect<mlir::scf::SCFDialect>();
+  ctx.getOrLoadDialect<mlir::omp::OpenMPDialect>();
+  ctx.getOrLoadDialect<mlir::gpu::GPUDialect>();
+  ctx.getOrLoadDialect<mlir::NVVM::NVVMDialect>();
+  ctx.getOrLoadDialect<mlir::LLVM::LLVMDialect>();
+  ctx.getOrLoadDialect<mlir::cf::ControlFlowDialect>();
+  ctx.getOrLoadDialect<mlir::math::MathDialect>();
 }
 
 JITEngine::~JITEngine() {
@@ -207,35 +215,35 @@ XdslResult JITEngine::runXdslLowering(const std::string &ir) {
 }
 
 void JITEngine::runBackendLowering(mlir::ModuleOp module, Backend backend) {
-  mlir::PassManager pm(&ctx);
+  std::unique_ptr<BackendPipeline> pipeline;
 
   switch (backend) {
-    case Backend::Sequential:
-      // TODO: add passes
-      break;
-    case Backend::OpenMP:
-      // TODO: add passes
-      break;
-    case Backend::CUDA:
-      // TODO: add passes
-      break;
+  case Backend::Sequential:
+    pipeline = std::make_unique<CPUSequentialPipeline>();
+    break;
+  case Backend::OpenMP:
+    pipeline = std::make_unique<OpenMPPipeline>();
+    break;
+  case Backend::CUDA:
+    pipeline = std::make_unique<CudaPipeline>(detectGpuSm());
+    break;
   }
 
-  if (mlir::failed(pm.run(module))) {
+  if (mlir::failed(pipeline->run(module, ctx))) {
     llvm::errs() << "backend lowering failed for module\n"; 
     return;
   }
 
-  std::cout << "=== BACKEND-LOWERED MLIR IR ===\n\n";
+  llvm::outs() << "=== BACKEND-LOWERED MLIR IR ===\n\n";
   module.print(llvm::outs());
-  std::cout << "\n";
+  llvm::outs() << "\n";
 }
 
 void JITEngine::compile() {
   module = builder.buildModule(queue_);
 
   std::string ir = builder.moduleToString(module);
-  std::cout << "=== OPS.PAR_LOOP MLIR IR ===\n\n" << ir << "\n";
+  llvm::outs() << "=== OPS.PAR_LOOP MLIR IR ===\n\n" << ir << "\n";
 
   XdslResult lowered = runXdslLowering(ir);
   if (!lowered.success) {
@@ -243,7 +251,7 @@ void JITEngine::compile() {
     return;
   }
   
-  std::cout << "=== LOWERED STENCIL IR (xDSL, in-process) ===\n\n"
+  llvm::outs() << "=== LOWERED STENCIL IR (xDSL, in-process) ===\n\n"
             << lowered.ir << "\n";
 
   mlir::OwningOpRef<mlir::ModuleOp> loweredModule = 
