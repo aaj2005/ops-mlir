@@ -1,6 +1,19 @@
 #include "runtime/JITEngine.h"
 #include "runtime/BackendPipeline.h"
+#include "mlir/InitAllPasses.h"
+#include "mlir/Parser/Parser.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "Python.h"
+
+#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 
 #include <iostream>
 
@@ -62,6 +75,14 @@ void JITEngine::flush() {
     flushCallback_(queue_);
   }
   queue_.clear();
+}
+
+std::string JITEngine::detectGpuSm() {
+  if (const char *env = std::getenv("OPS_GPU_SM"))
+    return env;
+  throw std::runtime_error(
+    "OPS_GPU_SM not set; GPU auto-detection isn't implemented in the "
+    "C++ path yet. Set OPS_GPU_SM=<compute capability> (e.g. '80').");
 }
 
 LoopDesc JITEngine::buildLoopDesc(std::uintptr_t kernelToken,

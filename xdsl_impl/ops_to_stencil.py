@@ -1,8 +1,5 @@
 """Lower ops.par_loop -> func.func + stencil.* using xDSL, mirroring
-lib/passes/OPSToStencil.cpp's C++ design (see xdsl_impl/laplace_stencil_1.mlir
-for the target IR shape).
-...
-[full module docstring, unchanged]
+lib/passes/OPSToStencil.cpp's C++ design.
 """
 
 from dataclasses import dataclass
@@ -14,7 +11,6 @@ from xdsl.ir import Block, Region, SSAValue
 from xdsl.passes import ModulePass
 
 from ops_dialect import ArgType, Access, DatAttr, ParLoopOp
-
 
 def field_bounds(dat: DatAttr) -> list[tuple[int, int]]:
     """Per-dim (lb, ub) bounds of the full allocated (halo-included) field."""
@@ -145,4 +141,3 @@ class OPSToStencilPass(ModulePass):
         module.body.block.add_op(fn)
         loop_op.detach()
         loop_op.erase()
-        

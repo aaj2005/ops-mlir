@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
 
 namespace ops_mlir {
 
@@ -126,14 +127,6 @@ public:
       "cse",
     };
   }
-
-    std::string JITEngine::detectGpuSm() {
-        if (const char *env = std::getenv("OPS_GPU_SM"))
-            return env;
-        throw std::runtime_error(
-            "OPS_GPU_SM not set; GPU auto-detection isn't implemented in the "
-            "C++ path yet. Set OPS_GPU_SM=<compute capability> (e.g. '80').");
-    }
 
 private:
   std::string gpuSm_;

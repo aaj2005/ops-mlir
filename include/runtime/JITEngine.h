@@ -64,12 +64,13 @@ private:
   /// embedded in `ir` are still live), and return the lowered stencil IR.
   XdslResult runXdslLowering(const std::string &ir);
 
-  void runBackendLowering(mlir::ModuleOp module, Backend backend)
+  void runBackendLowering(mlir::ModuleOp module, Backend backend);
 
 private:
   std::mutex mutex_;
   std::vector<LoopDesc> queue_;
   FlushCallback flushCallback_;
+  std::string detectGpuSm();
 };
 
 const char *accessToString(int access);
