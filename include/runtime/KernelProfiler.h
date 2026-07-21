@@ -13,6 +13,13 @@ struct KernelTiming {
     double milliseconds;
 };
 
+struct KernelStats {
+    std::string kernel_name;
+    int count = 0;
+    double total_ms = 0.0;
+    double avg_ms() const { return count ? total_ms / count: 0.0; };
+};
+
 class KernelProfiler {
 public:
     static KernelProfiler &instance();
@@ -39,6 +46,8 @@ public:
 
     const std::vector<KernelTiming> &records() const { return records_; }
 
+    std::vector<KernelStats> aggregate() const;
+
     void report() const;
     void writeCsv(const std::string &path) const;
 
@@ -47,10 +56,6 @@ private:
     std::vector<KernelTiming> records_;
 };
 
-
 } // namespace ops_mlir
-
-
-
 
 #endif // OPS_MLIR_RUNTIME_CORE_H
