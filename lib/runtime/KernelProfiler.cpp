@@ -39,5 +39,10 @@ namespace ops_mlir {
         if (!out) {
             std::cerr << "KernelProfiler: failed to open " << path << " for writing\n";
         }
+
+        out << "kernel_name,milliseconds\n";
+        for (const auto &t : records_) {
+            out << t.kernel_name << "," << t.milliseconds << "\n";
+        }
     }
 } // namespace ops_mlir
