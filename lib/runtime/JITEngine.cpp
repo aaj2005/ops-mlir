@@ -51,6 +51,9 @@ JITEngine::JITEngine() {
   ctx.getOrLoadDialect<mlir::LLVM::LLVMDialect>();
   ctx.getOrLoadDialect<mlir::cf::ControlFlowDialect>();
   ctx.getOrLoadDialect<mlir::math::MathDialect>();
+
+  // Resolve backend (without working CLI flags for now)
+  resolveBackend(0, nullptr);
 }
 
 JITEngine::~JITEngine() {
@@ -275,6 +278,11 @@ void JITEngine::runBackendLowering(mlir::ModuleOp module, Backend backend) {
     break;
   }
 
+  if (!pipeline) {
+    llvm::errs() << "no lowering pipeline for requested backend\n";
+    return;
+  }
+
   if (mlir::failed(pipeline->run(module, ctx))) {
     llvm::errs() << "backend lowering failed for module\n"; 
     return;
@@ -308,7 +316,7 @@ void JITEngine::compile() {
     return;
   }
 
-  runBackendLowering(*loweredModule,  kDefaultBackend);
+  runBackendLowering(*loweredModule,  backend_);
 }
 
 void JITEngine::execute() {
@@ -348,6 +356,35 @@ const char *argKindToString(ArgKind kind) {
   default:
     return "Unknown";
   }
+}
+
+std::optional<Backend> parseBackendName(const std::string &name) {
+  if (name == "seq" || name == "sequential") return Backend::Sequential;
+  if (name == "openmp" || name == "omp") return Backend::OpenMP;
+  if (name == "cuda" || name == "nvgpu") return Backend::CUDA; 
+  return std::nullopt;
+}
+
+
+Backend JITEngine ::resolveBackend(int argc, char **argv) {
+  // Explicit CLI flag takes precendence
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg.rfind(kBackendFlagPrefix, 0) == 0) {
+      std::string value = arg.substr(std::string(kBackendFlagPrefix).size());
+      if (auto b = parseBackendName(value)) return *b;
+      throw std::runtime_error("Unknown --backend value: '" + value + "' (expected seq|openmp|cuda)");
+    }
+  }
+
+  // Fall back to env variable
+  if (const char *env = std::getenv(kBackendEnvVar)) {
+    if (auto b = parseBackendName(env)) return *b;
+    throw std::runtime_error("Unknown " + std::string(kBackendEnvVar) + " value: '" + env + "' (expected seq|openmp|cuda)");
+  }
+
+  // Default to sequential if neither cli flag or env var set
+  return kDefaultBackend;
 }
 
 } // namespace ops_mlir

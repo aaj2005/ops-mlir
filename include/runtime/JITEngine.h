@@ -8,13 +8,18 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
+#include <string>
 
 namespace ops_mlir {
 
 enum class Backend { Sequential, OpenMP, CUDA };
 
-// TODO: Backend selection logic
+std::optional<Backend> parseBackendName(const std::string &name);
 constexpr Backend kDefaultBackend = Backend::Sequential;
+
+static constexpr const char *kBackendFlagPrefix = "--backend=";
+static constexpr const char *kBackendEnvVar = "OPS_BACKEND";
 
 struct XdslResult {
   bool success = false;
@@ -40,6 +45,12 @@ public:
 
   void execute();
 
+  void setBackend(Backend backend) { backend_ = backend; }
+  Backend backend() const { return backend_; }
+
+  // Note - resolveBackend is currently unused. This gives the option of a
+  Backend resolveBackend(int argc, char **argv);
+
   const std::vector<LoopDesc> &queue() const { return queue_; }
 
 private:
@@ -62,12 +73,13 @@ private:
   XdslResult runXdslLowering(const std::string &ir);
 
   void runBackendLowering(mlir::ModuleOp module, Backend backend);
+  std::string detectNVGpuSm();
 
 private:
+  Backend backend_ = kDefaultBackend;
   std::mutex mutex_;
   std::vector<LoopDesc> queue_;
   FlushCallback flushCallback_;
-  std::string detectNVGpuSm();
 };
 
 const char *accessToString(int access);
