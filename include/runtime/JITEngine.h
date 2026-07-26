@@ -59,9 +59,6 @@ private:
   DatDesc describeDat(ops_dat dat);
   StencilDesc describeStencil(ops_stencil stencil);
 
-  /// Case B: hand the textual IR to xdsl_impl/ops_to_xdsl.py running in
-  /// this same process (so the captured ops.dat/ops.stencil pointers
-  /// embedded in `ir` are still live), and return the lowered stencil IR.
   XdslResult runXdslLowering(const std::string &ir);
 
   void runBackendLowering(mlir::ModuleOp module, Backend backend);
@@ -70,7 +67,7 @@ private:
   std::mutex mutex_;
   std::vector<LoopDesc> queue_;
   FlushCallback flushCallback_;
-  std::string detectGpuSm();
+  std::string detectNVGpuSm();
 };
 
 const char *accessToString(int access);

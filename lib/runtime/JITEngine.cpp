@@ -77,7 +77,7 @@ void JITEngine::flush() {
   queue_.clear();
 }
 
-std::string JITEngine::detectGpuSm() {
+std::string JITEngine::detectNVGpuSm() {
   if (const char *env = std::getenv("OPS_GPU_SM"))
     return env;
   throw std::runtime_error(
@@ -246,7 +246,7 @@ void JITEngine::runBackendLowering(mlir::ModuleOp module, Backend backend) {
     pipeline = std::make_unique<OpenMPPipeline>();
     break;
   case Backend::CUDA:
-    pipeline = std::make_unique<CudaPipeline>(detectGpuSm());
+    pipeline = std::make_unique<CudaPipeline>(detectNVGpuSm());
     break;
   }
 
