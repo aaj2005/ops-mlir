@@ -17,6 +17,10 @@
 
 #include <iostream>
 
+#ifdef OPS_ENABLE_CUDA
+#include <cuda.h>
+#endif
+
 namespace ops_mlir {
 
 JITEngine &JITEngine::instance() {
@@ -80,9 +84,24 @@ void JITEngine::flush() {
 std::string JITEngine::detectNVGpuSm() {
   if (const char *env = std::getenv("OPS_GPU_SM"))
     return env;
+
+#ifdef OPS_ENABLE_CUDA
+  if (cuInit(0) != CUDA_SUCCESS) {
+    throw std::runtime_error(
+        "cuInit failed -- no NVIDIA driver found. Set OPS_GPU_SM manually.");
+  }
+  CUdevice device;
+  cuDeviceGet(&device, 0);
+  int major = 0, minor = 0;
+  cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device);
+  cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device);
+  return std::to_string(major) + std::to_string(minor);
+#else
   throw std::runtime_error(
-    "OPS_GPU_SM not set; GPU auto-detection isn't implemented in the "
-    "C++ path yet. Set OPS_GPU_SM=<compute capability> (e.g. '80').");
+      "This build was compiled without CUDA support (OPS_ENABLE_CUDA=OFF). "
+      "Reconfigure with -DOPS_ENABLE_CUDA=ON to use the CUDA backend, or "
+      "set OPS_GPU_SM manually if targeting a remote/precompiled binary.");
+#endif
 }
 
 LoopDesc JITEngine::buildLoopDesc(std::uintptr_t kernelToken,
@@ -246,7 +265,13 @@ void JITEngine::runBackendLowering(mlir::ModuleOp module, Backend backend) {
     pipeline = std::make_unique<OpenMPPipeline>();
     break;
   case Backend::CUDA:
-    pipeline = std::make_unique<CudaPipeline>(detectNVGpuSm());
+    #ifdef OPS_ENABLE_CUDA
+      pipeline = std::make_unique<CudaPipeline>(detectNVGpuSm());
+    #else
+      throw std::runtime_error(
+          "CUDA backend requested but this build was compiled without "
+          "CUDA support (OPS_ENABLE_CUDA=OFF).");
+    #endif
     break;
   }
 

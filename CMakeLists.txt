@@ -53,6 +53,16 @@ include(AddMLIR)
 include(TableGen)
 
 #===============================================================================
+# CUDA GPU Backend Configuration
+#===============================================================================
+option(OPS_ENABLE_CUDA "Build the NVIDIA CUDA/NVVM backend pipeline" OFF)
+
+if(OPS_ENABLE_CUDA)
+  find_package(CUDAToolkit REQUIRED)
+endif()
+
+
+#===============================================================================
 # Project Structure
 #===============================================================================
 include_directories(${CMAKE_SOURCE_DIR}/include)

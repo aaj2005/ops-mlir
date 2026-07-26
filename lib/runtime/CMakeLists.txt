@@ -19,7 +19,12 @@ target_compile_definitions(
 	OPSRuntime
 	PRIVATE
 	OPS_XDSL_DIR="${CMAKE_SOURCE_DIR}/xdsl_impl"
+	$<$<BOOL:${OPS_ENABLE_CUDA}>:OPS_ENABLE_CUDA>
 )
+
+if(OPS_ENABLE_CUDA)
+  target_link_libraries(OPSRuntime PRIVATE CUDA::cuda_driver)
+endif()
 
 target_link_libraries(
 	OPSRuntime
