@@ -1,7 +1,25 @@
 #include "runtime/JITEngine.h"
+#include "runtime/BackendPipeline.h"
+#include "mlir/InitAllPasses.h"
+#include "mlir/Parser/Parser.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "Python.h"
 
+#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
+
 #include <iostream>
+
+#ifdef OPS_ENABLE_CUDA
+#include <cuda.h>
+#endif
 
 namespace ops_mlir {
 
@@ -19,6 +37,23 @@ JITEngine::JITEngine() {
   // lib/runtime/CMakeLists.txt as the absolute path to xdsl_impl/.
   std::string setup = "import sys\nsys.path.insert(0, '" OPS_XDSL_DIR "')\n";
   PyRun_SimpleString(setup.c_str());
+
+  // Register needed dialects - will need to add more later
+  mlir::registerAllPasses();
+  // TODO: add all required dialects
+  ctx.getOrLoadDialect<mlir::func::FuncDialect>();
+  ctx.getOrLoadDialect<mlir::arith::ArithDialect>();
+  ctx.getOrLoadDialect<mlir::memref::MemRefDialect>();
+  ctx.getOrLoadDialect<mlir::scf::SCFDialect>();
+  ctx.getOrLoadDialect<mlir::omp::OpenMPDialect>();
+  ctx.getOrLoadDialect<mlir::gpu::GPUDialect>();
+  ctx.getOrLoadDialect<mlir::NVVM::NVVMDialect>();
+  ctx.getOrLoadDialect<mlir::LLVM::LLVMDialect>();
+  ctx.getOrLoadDialect<mlir::cf::ControlFlowDialect>();
+  ctx.getOrLoadDialect<mlir::math::MathDialect>();
+
+  // Resolve backend (without working CLI flags for now)
+  resolveBackend(0, nullptr);
 }
 
 JITEngine::~JITEngine() {
@@ -47,6 +82,29 @@ void JITEngine::flush() {
     flushCallback_(queue_);
   }
   queue_.clear();
+}
+
+std::string JITEngine::detectNVGpuSm() {
+  if (const char *env = std::getenv("OPS_GPU_SM"))
+    return env;
+
+#ifdef OPS_ENABLE_CUDA
+  if (cuInit(0) != CUDA_SUCCESS) {
+    throw std::runtime_error(
+        "cuInit failed -- no NVIDIA driver found. Set OPS_GPU_SM manually.");
+  }
+  CUdevice device;
+  cuDeviceGet(&device, 0);
+  int major = 0, minor = 0;
+  cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device);
+  cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device);
+  return std::to_string(major) + std::to_string(minor);
+#else
+  throw std::runtime_error(
+      "This build was compiled without CUDA support (OPS_ENABLE_CUDA=OFF). "
+      "Reconfigure with -DOPS_ENABLE_CUDA=ON to use the CUDA backend, or "
+      "set OPS_GPU_SM manually if targeting a remote/precompiled binary.");
+#endif
 }
 
 LoopDesc JITEngine::buildLoopDesc(std::uintptr_t kernelToken,
@@ -132,13 +190,31 @@ StencilDesc JITEngine::describeStencil(ops_stencil stencil) {
   return s;
 }
 
-std::string JITEngine::runXdslLowering(const std::string &ir) {
+static std::string fetchPyError() {
+  if (!PyErr_Occurred())
+    return "unknown Python error";
+  PyObject *type, *value, *tb;
+  PyErr_Fetch(&type, &value, &tb);
+  PyErr_NormalizeException(&type, &value, &tb);
+  std::string msg = "unknown Python error";
+  if (value) {
+    PyObject *str = PyObject_Str(value);
+    if (str) {
+      if (const char *s = PyUnicode_AsUTF8(str)) msg = s;
+      Py_DECREF(str);
+    }
+  }
+  Py_XDECREF(type); Py_XDECREF(value); Py_XDECREF(tb);
+  return msg;
+}
+
+XdslResult JITEngine::runXdslLowering(const std::string &ir) {
   PyGILState_STATE gstate = PyGILState_Ensure();
-  std::string result;
+  XdslResult result;
 
   PyObject *mod = PyImport_ImportModule("ops_to_xdsl");
   if (!mod) {
-    PyErr_Print();
+    result.error = fetchPyError();
     PyGILState_Release(gstate);
     return result;
   }
@@ -146,7 +222,7 @@ std::string JITEngine::runXdslLowering(const std::string &ir) {
   PyObject *func = PyObject_GetAttrString(mod, "convert_ir_text");
   Py_DECREF(mod);
   if (!func || !PyCallable_Check(func)) {
-    PyErr_Print();
+    result.error = fetchPyError();
     Py_XDECREF(func);
     PyGILState_Release(gstate);
     return result;
@@ -154,7 +230,7 @@ std::string JITEngine::runXdslLowering(const std::string &ir) {
 
   PyObject *args = Py_BuildValue("(s)", ir.c_str());
   if (!args) {
-    PyErr_Print();
+    result.error = fetchPyError();
     Py_DECREF(func);
     PyGILState_Release(gstate);
     return result;
@@ -164,15 +240,16 @@ std::string JITEngine::runXdslLowering(const std::string &ir) {
   Py_DECREF(func);
 
   if (!pyResult) {
-    PyErr_Print();
+    result.error = fetchPyError();
     PyGILState_Release(gstate);
     return result;
   }
 
   if (const char *text = PyUnicode_AsUTF8(pyResult)) {
-    result = text;
+    result.ir = text;
+    result.success = true;
   } else {
-    PyErr_Print();
+    result.error = fetchPyError();
   }
   Py_DECREF(pyResult);
 
@@ -180,17 +257,66 @@ std::string JITEngine::runXdslLowering(const std::string &ir) {
   return result;
 }
 
+void JITEngine::runBackendLowering(mlir::ModuleOp module, Backend backend) {
+  std::unique_ptr<BackendPipeline> pipeline;
+
+  switch (backend) {
+  case Backend::Sequential:
+    pipeline = std::make_unique<CPUSequentialPipeline>();
+    break;
+  case Backend::OpenMP:
+    pipeline = std::make_unique<OpenMPPipeline>();
+    break;
+  case Backend::CUDA:
+    #ifdef OPS_ENABLE_CUDA
+      pipeline = std::make_unique<CudaPipeline>(detectNVGpuSm());
+    #else
+      throw std::runtime_error(
+          "CUDA backend requested but this build was compiled without "
+          "CUDA support (OPS_ENABLE_CUDA=OFF).");
+    #endif
+    break;
+  }
+
+  if (!pipeline) {
+    llvm::errs() << "no lowering pipeline for requested backend\n";
+    return;
+  }
+
+  if (mlir::failed(pipeline->run(module, ctx))) {
+    llvm::errs() << "backend lowering failed for module\n"; 
+    return;
+  }
+
+  llvm::outs() << "=== BACKEND-LOWERED MLIR IR ===\n\n";
+  module.print(llvm::outs());
+  llvm::outs() << "\n";
+}
+
 void JITEngine::compile() {
   module = builder.buildModule(queue_);
 
   std::string ir = builder.moduleToString(module);
-  std::cout << "=== OPS.PAR_LOOP MLIR IR ===\n\n" << ir << "\n";
+  llvm::outs() << "=== OPS.PAR_LOOP MLIR IR ===\n\n" << ir << "\n";
 
-  std::string lowered = runXdslLowering(ir);
-  if (!lowered.empty()) {
-    std::cout << "=== LOWERED STENCIL IR (xDSL, in-process) ===\n\n"
-              << lowered << "\n";
+  XdslResult lowered = runXdslLowering(ir);
+  if (!lowered.success) {
+    llvm::errs() << "xDSL lowering failed: " <<  lowered.error << "\n";
+    return;
   }
+  
+  llvm::outs() << "=== LOWERED STENCIL IR (xDSL, in-process) ===\n\n"
+            << lowered.ir << "\n";
+
+  mlir::OwningOpRef<mlir::ModuleOp> loweredModule = 
+    mlir::parseSourceString<mlir::ModuleOp>(lowered.ir, &ctx);
+
+  if (!loweredModule) {
+    llvm::errs() << "Failed to parse xDSL output as MLIR\n";
+    return;
+  }
+
+  runBackendLowering(*loweredModule,  backend_);
 }
 
 void JITEngine::execute() {
@@ -230,6 +356,35 @@ const char *argKindToString(ArgKind kind) {
   default:
     return "Unknown";
   }
+}
+
+std::optional<Backend> parseBackendName(const std::string &name) {
+  if (name == "seq" || name == "sequential") return Backend::Sequential;
+  if (name == "openmp" || name == "omp") return Backend::OpenMP;
+  if (name == "cuda" || name == "nvgpu") return Backend::CUDA; 
+  return std::nullopt;
+}
+
+
+Backend JITEngine ::resolveBackend(int argc, char **argv) {
+  // Explicit CLI flag takes precendence
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg.rfind(kBackendFlagPrefix, 0) == 0) {
+      std::string value = arg.substr(std::string(kBackendFlagPrefix).size());
+      if (auto b = parseBackendName(value)) return *b;
+      throw std::runtime_error("Unknown --backend value: '" + value + "' (expected seq|openmp|cuda)");
+    }
+  }
+
+  // Fall back to env variable
+  if (const char *env = std::getenv(kBackendEnvVar)) {
+    if (auto b = parseBackendName(env)) return *b;
+    throw std::runtime_error("Unknown " + std::string(kBackendEnvVar) + " value: '" + env + "' (expected seq|openmp|cuda)");
+  }
+
+  // Default to sequential if neither cli flag or env var set
+  return kDefaultBackend;
 }
 
 } // namespace ops_mlir

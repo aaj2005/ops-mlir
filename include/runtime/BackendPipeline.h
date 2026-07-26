@@ -1,0 +1,159 @@
+#ifndef OPS_BACKEND
+#define OPS_BACKEND
+#include <string>
+#include <vector>
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
+
+#include "mlir/Conversion/Passes.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Transforms/Passes.h"
+#include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
+#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
+#include "mlir/Conversion/SCFToOpenMP/SCFToOpenMP.h"
+#include "mlir/Conversion/OpenMPToLLVM/ConvertOpenMPToLLVM.h"
+#include "mlir/Dialect/GPU/Transforms/Passes.h"
+#include "mlir/Conversion/SCFToGPU/SCFToGPUPass.h"
+#include "mlir/Conversion/GPUToNVVM/GPUToNVVMPass.h"
+#include "mlir/Conversion/GPUCommon/GPUCommonPass.h"
+
+namespace ops_mlir {
+
+class BackendPipeline {
+public:
+  virtual ~BackendPipeline() = default;
+  virtual void build(mlir::PassManager &pm) const = 0;
+
+  mlir::LogicalResult run(mlir::ModuleOp module, mlir::MLIRContext &ctx) const {
+    mlir::PassManager pm(&ctx);
+    build(pm);
+    return pm.run(module);
+  }
+};
+
+class CPUSequentialPipeline : public BackendPipeline {
+public:
+  void build(mlir::PassManager &pm) const override {
+    pm.addPass(mlir::createConvertBufferizationToMemRefPass());
+    pm.addPass(mlir::createSCFToControlFlowPass());
+    pm.addPass(mlir::createConvertControlFlowToLLVMPass());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
+    pm.addPass(mlir::createLowerAffinePass());
+    pm.addPass(mlir::createConvertMathToLLVMPass());
+    pm.addPass(mlir::createArithToLLVMConversionPass());
+
+    mlir::ConvertFuncToLLVMPassOptions funcToLLVMOpts;
+    funcToLLVMOpts.useBarePtrCallConv = true;
+    pm.addPass(mlir::createConvertFuncToLLVMPass(funcToLLVMOpts));
+
+    pm.addPass(mlir::memref::createExpandStridedMetadataPass());
+    pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
+    pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
+  }
+};
+
+class OpenMPPipeline : public BackendPipeline {
+public:
+  void build(mlir::PassManager &pm) const override {
+    pm.addPass(mlir::createConvertBufferizationToMemRefPass());
+    pm.addPass(mlir::createConvertSCFToOpenMPPass());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
+
+    pm.addPass(mlir::createConvertOpenMPToLLVMPass());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createLowerAffinePass());
+    pm.addPass(mlir::createConvertMathToLLVMPass());
+    pm.addPass(mlir::memref::createExpandStridedMetadataPass());
+    pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
+
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createSCFToControlFlowPass());
+    pm.addPass(mlir::createConvertControlFlowToLLVMPass());
+    pm.addPass(mlir::createLowerAffinePass());
+    pm.addPass(mlir::createArithToLLVMConversionPass());
+    pm.addPass(mlir::createConvertMathToLLVMPass());
+
+    mlir::ConvertFuncToLLVMPassOptions funcToLLVMOpts;
+    funcToLLVMOpts.useBarePtrCallConv = true;
+    pm.addPass(mlir::createConvertFuncToLLVMPass(funcToLLVMOpts));
+
+    pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+  }
+};
+
+class CudaPipeline : public BackendPipeline {
+public:
+  explicit CudaPipeline(std::string nvgpuSm) : nvgpuSm_(std::move(nvgpuSm)) {}
+
+  void build(mlir::PassManager &pm) const override {
+    pm.addPass(mlir::createConvertBufferizationToMemRefPass());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
+    pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+
+    pm.addNestedPass<mlir::func::FuncOp>(mlir::createGpuMapParallelLoopsPass());
+    pm.addNestedPass<mlir::func::FuncOp>(mlir::createConvertParallelLoopToGpuPass());
+
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
+    pm.addPass(mlir::memref::createFoldMemRefAliasOpsPass());
+
+    pm.addPass(mlir::createGpuKernelOutliningPass());
+
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
+    pm.addPass(mlir::memref::createFoldMemRefAliasOpsPass());
+
+    pm.addPass(mlir::memref::createExpandStridedMetadataPass());
+    pm.addPass(mlir::createLowerAffinePass());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
+
+    pm.addNestedPass<mlir::func::FuncOp>(mlir::createGpuAsyncRegionPass());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
+
+    pm.addPass(mlir::createArithToLLVMConversionPass());
+    pm.addPass(mlir::createConvertMathToLLVMPass());
+    pm.addPass(mlir::createSCFToControlFlowPass());
+    pm.addPass(mlir::createConvertControlFlowToLLVMPass());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
+
+    mlir::ConvertFuncToLLVMPassOptions funcToLLVMOpts;
+    funcToLLVMOpts.useBarePtrCallConv = true;
+    pm.addPass(mlir::createConvertFuncToLLVMPass(funcToLLVMOpts));
+
+    // check these
+
+    {
+      mlir::OpPassManager &gpuModulePm = pm.nest<mlir::gpu::GPUModuleOp>();
+      gpuModulePm.addPass(mlir::createConvertGpuOpsToNVVMOps());
+      gpuModulePm.addPass(mlir::createCanonicalizerPass());
+      gpuModulePm.addPass(mlir::createCSEPass());
+    }
+
+    pm.addPass(mlir::createGpuToLLVMConversionPass());
+    pm.addPass(mlir::createGpuModuleToBinaryPass());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
+  }
+
+private:
+  std::string nvgpuSm_;
+};
+
+} // namespace ops_mlir
+
+
+#endif // OPS_BACKEND
