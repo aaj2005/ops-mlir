@@ -1,7 +1,7 @@
 #ifndef OPS_MLIR_RUNTIME_PROFILER_H
+#define OPS_MLIR_RUNTIME_PROFILER_H
 
 #include <chrono>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -40,7 +40,6 @@ public:
     };
 
     void record(const std::string &kernelName, double ms) {
-        std::lock_guard<std::mutex> lock(mutex_);
         records_.push_back({kernelName, ms});
     }
 
@@ -52,10 +51,9 @@ public:
     void writeCsv(const std::string &path) const;
 
 private:
-    std::mutex mutex_;
     std::vector<KernelTiming> records_;
 };
 
 } // namespace ops_mlir
 
-#endif // OPS_MLIR_RUNTIME_CORE_H
+#endif // OPS_MLIR_RUNTIME_PROFILER_H
