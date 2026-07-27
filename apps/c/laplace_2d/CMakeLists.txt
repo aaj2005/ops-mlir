@@ -1,8 +1,5 @@
 #===============================================================================
 # Laplace 2D Application
-#===============================================================================
-
-find_package(OpenMP REQUIRED)
 
 # Collect OPS sequential backend sources from the OPS source tree
 file(GLOB OPS_CORE_SRCS   "${OPS_ROOT}/src/core/*.cpp")
@@ -19,7 +16,6 @@ add_library(ops_seq_local STATIC
   ${OPS_EXTERN_SRCS}
 )
 target_include_directories(ops_seq_local PUBLIC ${OPS_ROOT}/include)
-target_link_libraries(ops_seq_local PRIVATE OpenMP::OpenMP_CXX)
 target_compile_options(ops_seq_local PRIVATE -fno-PIE)
 
 #===============================================================================
@@ -48,7 +44,6 @@ target_link_libraries(laplace_2d
   MLIRPass
   MLIRSupport
   ops_seq_local
-  OpenMP::OpenMP_CXX
   m
 )
 
