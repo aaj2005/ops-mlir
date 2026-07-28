@@ -2,6 +2,7 @@
 lib/passes/OPSToStencil.cpp's C++ design.
 """
 
+import ctypes
 from dataclasses import dataclass
 from xdsl.builder import Builder, InsertPoint
 from xdsl.context import Context
@@ -10,7 +11,7 @@ from xdsl.dialects.builtin import IndexType, IntegerAttr, MemRefType, ModuleOp, 
 from xdsl.ir import Block, Region, SSAValue
 from xdsl.passes import ModulePass
 
-from ops_dialect import ArgType, Access, DatAttr, ParLoopOp
+from ops_dialect import ArgType, Access, DatAttr, ParLoopOp, StencilAttr
 
 def field_bounds(dat: DatAttr) -> list[tuple[int, int]]:
     """Normalized 0-based field bounds: lb=0, ub=full allocated size per dim."""
@@ -20,9 +21,19 @@ def halo_offsets(dat_args) -> list[int]:
     """Per-dim d_m values (negative) from the first dat — shared across all dats on a block."""
     return list(dat_args[0].dat.d_m_list)
 
-def stencil_points(ndim: int) -> list[tuple[int, ...]]:
-    """Defaults to a single (0, ..., 0) access point -- see module docstring."""
-    return [tuple(0 for _ in range(ndim))]
+def stencil_offsets(stencil_attr: StencilAttr) -> list[tuple[int, ...]]:
+    """Per-point access offsets for an arg's stencil.
+
+    Extract the offsets from the StencilAttr's raw pointer to the underlying C array.
+    """
+    dims = stencil_attr.dims.data
+    points = stencil_attr.points.data
+    addr = stencil_attr.stencil.data
+    if addr == 0 or points == 0:
+        return [tuple(0 for _ in range(dims))]
+
+    flat = (ctypes.c_int32 * (dims * points)).from_address(addr)
+    return [tuple(flat[p * dims + d] for d in range(dims)) for p in range(points)]
 
 def range_bounds(rng: list[int], ndim: int) -> list[tuple[int, int]]:
     return [(rng[2 * i], rng[2 * i + 1]) for i in range(ndim)]
@@ -74,12 +85,14 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
     # Partition dat args (by access mode) into stencil.apply's reads/writes
     reads: list[SSAValue] = []
     read_types = []
+    read_stencils: list[StencilAttr] = []
     writes: list[SSAValue] = []
     for arg, field in zip(dat_args, block.args):
         access = arg.acc.data
         if access in (Access.READ, Access.RW):
             reads.append(field)
             read_types.append(field.type)
+            read_stencils.append(arg.stencil)
         if access in (Access.WRITE, Access.RW, Access.INC):
             writes.append(field)
 
@@ -87,13 +100,16 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
     apply_block = Block(arg_types=read_types)
     block_builder = Builder(InsertPoint.at_end(apply_block))
 
+    # One stencil.access per real stencil point (from stencil_offsets), not
+    # just a placeholder (0, ..., 0) -- so multi-point stencils (e.g. a 5pt
+    # Laplacian) actually read all their neighbors.
     access_results = []
-    for block_arg in apply_block.args:
-        for point in stencil_points(ndim):
+    for block_arg, stencil_attr in zip(apply_block.args, read_stencils):
+        for point in stencil_offsets(stencil_attr):
             access = block_builder.insert(stencil.AccessOp(block_arg, point))
             access_results.append(access.res)
 
-    # Compute per-dim index buffers for the kernel call, which are passed as MemRefType(i32, [ndim]) 
+    # Compute per-dim index buffers for the kernel call, which are passed as MemRefType(i32, [ndim])
     idx_buffers = []
     # Offset d_m[dim] un-normalizes the loop index back to the OPS global index:
     # ops_global_idx = normalized_loop_idx + d_m  (d_m is negative, e.g. -1)
