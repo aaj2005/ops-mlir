@@ -39,8 +39,8 @@ void ops_par_loop(KernelFn kernel, const char *name, ops_block block, int dims,
       token, name, block, dims, range, packedArgs.data(), packedArgs.size());
 }
 
-void compile() {
-  ops_mlir::JITEngine::instance().compile();
+void compile_and_execute() {
+  ops_mlir::JITEngine::instance().compile_and_execute();
 }
 
 #endif // OPS_WRAPPER_H

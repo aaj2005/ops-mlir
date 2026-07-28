@@ -67,7 +67,7 @@ int main(int argc, const char **argv) {
   ops_par_loop(set_zero, "set_zero", block, 2, full_range,
                ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE));
 
-  // set boundary conditions
+  // set boundary conditions for A
   int bottom_range[] = {-1, imax + 1, -1, 0};
   ops_par_loop(set_zero, "set_zero", block, 2, bottom_range,
                ops_arg_dat(d_A, 1, S2D_00, "double", OPS_WRITE));
@@ -75,7 +75,7 @@ int main(int argc, const char **argv) {
   int top_range[] = {-1, imax + 1, jmax, jmax + 1};
   ops_par_loop(set_zero, "set_zero", block, 2, top_range,
                ops_arg_dat(d_A, 1, S2D_00, "double", OPS_WRITE));
-
+	
   int left_range[] = {-1, 0, -1, jmax + 1};
   ops_par_loop(left_bndcon, "left_bndcon", block, 2, left_range,
                ops_arg_dat(d_A, 1, S2D_00, "double", OPS_WRITE), ops_arg_idx());
@@ -84,7 +84,49 @@ int main(int argc, const char **argv) {
   ops_par_loop(right_bndcon, "right_bndcon", block, 2, right_range,
                ops_arg_dat(d_A, 1, S2D_00, "double", OPS_WRITE), ops_arg_idx());
 
-  compile();
+  // set boundary conditions for Anew
+  ops_par_loop(set_zero, "set zero", block, 2, bottom_range,
+      ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE));
+
+  ops_par_loop(set_zero, "set zero", block, 2, top_range,
+      ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE));
+
+  ops_par_loop(left_bndcon, "left bndcon", block, 2, left_range,
+      ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE),
+      ops_arg_idx());
+
+  ops_par_loop(right_bndcon, "right bndcon", block, 2, right_range,
+      ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE),
+      ops_arg_idx());
+
+  compile_and_execute();
+
+  int iter = 0;
+
+  while (iter < iter_max) {
+    int interior_range[] = {0,imax,0,jmax};
+    ops_par_loop(apply_stencil, "apply stencil", block, 2, interior_range,
+        ops_arg_dat(d_A,    1, S2D_5pt, "double", OPS_READ),
+        ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE),
+        ops_arg_reduce(h_err, 1, "double", OPS_MAX));
+      
+    ops_par_loop(copy, "copy", block, 2, interior_range,
+        ops_arg_dat(d_A,    1, S2D_00, "double", OPS_WRITE),
+        ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_READ));
+
+    compile_and_execute();
+    ++iter;
+  }
+
+  double *anew_data = reinterpret_cast<double *>(d_Anew->data);
+  int stride = d_Anew->size[1];
+  printf("d_Anew sample values after %d iterations:\n", iter);
+  for (int i = 0; i < 5; ++i) {
+    int x = i;
+    int y = jmax / 2;
+    printf("  Anew[x=%d,y=%d] = %f\n", x - 1, y - 1,
+           anew_data[x * stride + y]);
+  }
 
   ops_printf("Jacobi relaxation Calculation: %d x %d mesh\n", imax + 2,
              jmax + 2);

@@ -15,7 +15,13 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 
-#include <iostream>
+#include "mlir/ExecutionEngine/ExecutionEngine.h"
+#include "mlir/ExecutionEngine/OptUtils.h"
+#include "mlir/Target/LLVMIR/Dialect/All.h"
+#include "llvm/Support/TargetSelect.h"
+
+#include <algorithm>
+#include <memory>
 
 #ifdef OPS_ENABLE_CUDA
 #include <cuda.h>
@@ -51,6 +57,19 @@ JITEngine::JITEngine() {
   ctx.getOrLoadDialect<mlir::LLVM::LLVMDialect>();
   ctx.getOrLoadDialect<mlir::cf::ControlFlowDialect>();
   ctx.getOrLoadDialect<mlir::math::MathDialect>();
+
+  // Needed by ExecutionEngine::create to translate the lowered module to
+  // LLVM IR; without these, translation fails with "missing
+  // LLVMTranslationDialectInterface registration".
+  mlir::DialectRegistry registry;
+  mlir::registerAllToLLVMIRTranslations(registry);
+  ctx.appendDialectRegistry(registry);
+
+  // Needed so the JIT's target machine can be created for the host triple;
+  // without this, ExecutionEngine::create fails with "Unable to find target
+  // for this triple (no targets are registered)".
+  llvm::InitializeNativeTarget();
+  llvm::InitializeNativeTargetAsmPrinter();
 
   // Resolve backend (without working CLI flags for now)
   resolveBackend(0, nullptr);
@@ -288,16 +307,21 @@ void JITEngine::runBackendLowering(mlir::ModuleOp module, Backend backend) {
     return;
   }
 
+#ifdef OPS_ENABLE_DEBUG
   llvm::outs() << "=== BACKEND-LOWERED MLIR IR ===\n\n";
   module.print(llvm::outs());
   llvm::outs() << "\n";
+#endif
 }
 
 void JITEngine::compile() {
   module = builder.buildModule(queue_);
 
   std::string ir = builder.moduleToString(module);
+
+#ifdef OPS_ENABLE_DEBUG
   llvm::outs() << "=== OPS.PAR_LOOP MLIR IR ===\n\n" << ir << "\n";
+#endif
 
   XdslResult lowered = runXdslLowering(ir);
   if (!lowered.success) {
@@ -305,23 +329,97 @@ void JITEngine::compile() {
     return;
   }
   
+#ifdef OPS_ENABLE_DEBUG
   llvm::outs() << "=== LOWERED STENCIL IR (xDSL, in-process) ===\n\n"
             << lowered.ir << "\n";
+#endif
 
-  mlir::OwningOpRef<mlir::ModuleOp> loweredModule = 
+  loweredModule_ =
     mlir::parseSourceString<mlir::ModuleOp>(lowered.ir, &ctx);
 
-  if (!loweredModule) {
+  if (!loweredModule_) {
     llvm::errs() << "Failed to parse xDSL output as MLIR\n";
     return;
   }
 
-  runBackendLowering(*loweredModule,  backend_);
+  runBackendLowering(*loweredModule_, backend_);
+  module = *loweredModule_;
 }
 
-void JITEngine::execute() {
-  // Placeholder for future execution logic
-  std::cout << "Executing compiled module...\n";
+void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
+  // Each ops.par_loop was lowered to a standalone function named
+  // "ops_par_loop_<kernel_name>_<queue_index>" taking one bare pointer per
+  // ops_dat argument, in the order the loops were enqueued. We invoke them
+  // one by one with the live data pointers.
+  for (std::size_t i = 0; i < queue_.size(); ++i) {
+    const LoopDesc &loop = queue_[i];
+    std::string funcName =
+        "ops_par_loop_" + loop.kernel_name + "_" + std::to_string(i);
+
+    std::vector<void *> datPtrs;
+    for (const ArgDesc &arg : loop.args) {
+      if (arg.argtype == OPS_ARG_DAT) {
+        datPtrs.push_back(reinterpret_cast<void *>(arg.data));
+      }
+    }
+
+    llvm::SmallVector<void *> packedArgs;
+    packedArgs.reserve(datPtrs.size());
+    for (void *&ptr : datPtrs) {
+      packedArgs.push_back(&ptr);
+    }
+
+    if (auto err = engine->invokePacked(funcName, packedArgs)) {
+      llvm::errs() << "Failed to invoke '" << funcName
+                   << "': " << llvm::toString(std::move(err)) << "\n";
+      return;
+    }
+  }
+
+  // Clear the queue
+  this->flush();
+}
+
+void JITEngine::compile_and_execute() {
+  compile();
+
+  mlir::ExecutionEngineOptions engineOptions;
+  engineOptions.transformer = mlir::makeOptimizingTransformer(
+      /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
+
+  auto engineOrErr = mlir::ExecutionEngine::create(module, engineOptions);
+  if (!engineOrErr) {
+    llvm::errs() << "Failed to create ExecutionEngine: "
+                  << llvm::toString(engineOrErr.takeError()) << "\n";
+    return;
+  }
+
+  auto engine = std::move(*engineOrErr);
+
+  switch (backend_) {
+  case Backend::Sequential:
+  case Backend::OpenMP:
+    registerCpuKernelSymbols(*engine);
+    break;
+  case Backend::CUDA:
+    // Kernels should be added to the Host side. CPU side symbols are not valid.
+    break;
+  }
+
+  execute(std::move(engine));
+}
+
+void JITEngine::registerCpuKernelSymbols(mlir::ExecutionEngine &engine) {
+  engine.registerSymbols([this](llvm::orc::MangleAndInterner interner) {
+    llvm::orc::SymbolMap symbolMap;
+    for (const LoopDesc &loop : queue_) {
+      void *kernelPtr = reinterpret_cast<void *>(loop.kernel_token);
+      symbolMap[interner(loop.kernel_name)] = {
+          llvm::orc::ExecutorAddr::fromPtr(kernelPtr),
+          llvm::JITSymbolFlags::Exported};
+    }
+    return symbolMap;
+  });
 }
 
 const char *accessToString(int access) {
@@ -366,7 +464,7 @@ std::optional<Backend> parseBackendName(const std::string &name) {
 }
 
 
-Backend JITEngine ::resolveBackend(int argc, char **argv) {
+Backend JITEngine::resolveBackend(int argc, char **argv) {
   // Explicit CLI flag takes precendence
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];

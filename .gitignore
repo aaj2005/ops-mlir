@@ -28,3 +28,10 @@ include/Dialect/OPS/OPS*.cpp.inc
 .DS_Store
 
 .claude/
+
+# Temporary files
+*.ipynb
+__pycache__/
+
+# subproject clones
+xdsl/*

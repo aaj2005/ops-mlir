@@ -4,9 +4,11 @@
 #include "IRBuilder.h"
 #include "Core.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/ExecutionEngine/ExecutionEngine.h"
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -41,9 +43,7 @@ public:
 
   void flush();
 
-  void compile();
-
-  void execute();
+  void compile_and_execute();
 
   void setBackend(Backend backend) { backend_ = backend; }
   Backend backend() const { return backend_; }
@@ -59,6 +59,8 @@ private:
 
   mlir::MLIRContext ctx;
   mlir::ModuleOp module;
+  mlir::OwningOpRef<mlir::ModuleOp> loweredModule_;
+
   IRBuilder builder{&ctx};
 
   LoopDesc buildLoopDesc(std::uintptr_t kernelToken, const char *kernelName,
@@ -74,6 +76,10 @@ private:
 
   void runBackendLowering(mlir::ModuleOp module, Backend backend);
   std::string detectNVGpuSm();
+
+  void compile();
+  void execute(std::unique_ptr<mlir::ExecutionEngine> engine);
+  void registerCpuKernelSymbols(mlir::ExecutionEngine &engine);
 
 private:
   Backend backend_ = kDefaultBackend;
