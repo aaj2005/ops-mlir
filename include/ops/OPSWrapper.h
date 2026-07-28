@@ -43,4 +43,8 @@ void compile() {
   ops_mlir::JITEngine::instance().compile();
 }
 
+void execute() {
+  ops_mlir::JITEngine::instance().execute();
+}
+
 #endif // OPS_WRAPPER_H

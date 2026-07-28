@@ -15,7 +15,13 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 
-#include <iostream>
+#include "mlir/ExecutionEngine/ExecutionEngine.h"
+#include "mlir/ExecutionEngine/OptUtils.h"
+#include "mlir/Target/LLVMIR/Dialect/All.h"
+#include "llvm/Support/TargetSelect.h"
+
+#include <algorithm>
+#include <memory>
 
 #ifdef OPS_ENABLE_CUDA
 #include <cuda.h>
@@ -51,6 +57,19 @@ JITEngine::JITEngine() {
   ctx.getOrLoadDialect<mlir::LLVM::LLVMDialect>();
   ctx.getOrLoadDialect<mlir::cf::ControlFlowDialect>();
   ctx.getOrLoadDialect<mlir::math::MathDialect>();
+
+  // Needed by ExecutionEngine::create to translate the lowered module to
+  // LLVM IR; without these, translation fails with "missing
+  // LLVMTranslationDialectInterface registration".
+  mlir::DialectRegistry registry;
+  mlir::registerAllToLLVMIRTranslations(registry);
+  ctx.appendDialectRegistry(registry);
+
+  // Needed so the JIT's target machine can be created for the host triple;
+  // without this, ExecutionEngine::create fails with "Unable to find target
+  // for this triple (no targets are registered)".
+  llvm::InitializeNativeTarget();
+  llvm::InitializeNativeTargetAsmPrinter();
 
   // Resolve backend (without working CLI flags for now)
   resolveBackend(0, nullptr);
@@ -310,18 +329,64 @@ void JITEngine::compile() {
 
   mlir::OwningOpRef<mlir::ModuleOp> loweredModule = 
     mlir::parseSourceString<mlir::ModuleOp>(lowered.ir, &ctx);
-
+  
   if (!loweredModule) {
     llvm::errs() << "Failed to parse xDSL output as MLIR\n";
     return;
   }
 
   runBackendLowering(*loweredModule,  backend_);
+  module = *loweredModule;
+
+  mlir::ExecutionEngineOptions engineOptions;
+  engineOptions.transformer = mlir::makeOptimizingTransformer(
+      /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
+
+  auto engineOrErr = mlir::ExecutionEngine::create(module, engineOptions);
+  if (!engineOrErr) {
+    llvm::errs() << "Failed to create ExecutionEngine: "
+                  << llvm::toString(engineOrErr.takeError()) << "\n";
+    return;
+  }
+
+  engine = std::move(*engineOrErr);
 }
 
 void JITEngine::execute() {
-  // Placeholder for future execution logic
-  std::cout << "Executing compiled module...\n";
+  if (!engine) {
+    llvm::errs() << "JITEngine::execute: no compiled module (call compile() "
+                    "first)\n";
+    return;
+  }
+
+  // Each ops.par_loop was lowered to a standalone function named
+  // "ops_par_loop_<kernel_name>_<queue_index>" taking one bare pointer per
+  // ops_dat argument, in the order the loops were enqueued. We invoke them
+  // one by one with the live data pointers.
+  for (std::size_t i = 0; i < queue_.size(); ++i) {
+    const LoopDesc &loop = queue_[i];
+    std::string funcName =
+        "ops_par_loop_" + loop.kernel_name + "_" + std::to_string(i);
+
+    std::vector<void *> datPtrs;
+    for (const ArgDesc &arg : loop.args) {
+      if (arg.argtype == OPS_ARG_DAT) {
+        datPtrs.push_back(reinterpret_cast<void *>(arg.data));
+      }
+    }
+
+    llvm::SmallVector<void *> packedArgs;
+    packedArgs.reserve(datPtrs.size());
+    for (void *&ptr : datPtrs) {
+      packedArgs.push_back(&ptr);
+    }
+
+    if (auto err = engine->invokePacked(funcName, packedArgs)) {
+      llvm::errs() << "Failed to invoke '" << funcName
+                   << "': " << llvm::toString(std::move(err)) << "\n";
+      return;
+    }
+  }
 }
 
 const char *accessToString(int access) {

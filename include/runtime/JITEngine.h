@@ -4,9 +4,11 @@
 #include "IRBuilder.h"
 #include "Core.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/ExecutionEngine/ExecutionEngine.h"
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -59,6 +61,8 @@ private:
 
   mlir::MLIRContext ctx;
   mlir::ModuleOp module;
+  std::unique_ptr<mlir::ExecutionEngine> engine;
+
   IRBuilder builder{&ctx};
 
   LoopDesc buildLoopDesc(std::uintptr_t kernelToken, const char *kernelName,

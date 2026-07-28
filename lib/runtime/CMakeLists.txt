@@ -34,5 +34,8 @@ target_link_libraries(
 	MLIRSupport
 	MLIRPass
 	MLIROPSDialect
+	MLIRExecutionEngine
+	MLIRTargetLLVMIRExport
+	MLIRToLLVMIRTranslationRegistration
 	Python3::Python
 )

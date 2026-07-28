@@ -85,6 +85,7 @@ int main(int argc, const char **argv) {
                ops_arg_dat(d_A, 1, S2D_00, "double", OPS_WRITE), ops_arg_idx());
 
   compile();
+  execute();
 
   ops_printf("Jacobi relaxation Calculation: %d x %d mesh\n", imax + 2,
              jmax + 2);
