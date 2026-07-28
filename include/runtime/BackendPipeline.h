@@ -69,17 +69,9 @@ public:
     pm.addPass(mlir::createCanonicalizerPass());
     pm.addPass(mlir::createCSEPass());
 
-    pm.addPass(mlir::createConvertOpenMPToLLVMPass());
-    pm.addPass(mlir::createCanonicalizerPass());
     pm.addPass(mlir::createLowerAffinePass());
-    pm.addPass(mlir::createConvertMathToLLVMPass());
-    pm.addPass(mlir::memref::createExpandStridedMetadataPass());
-    pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
-
-    pm.addPass(mlir::createCanonicalizerPass());
     pm.addPass(mlir::createSCFToControlFlowPass());
     pm.addPass(mlir::createConvertControlFlowToLLVMPass());
-    pm.addPass(mlir::createLowerAffinePass());
     pm.addPass(mlir::createArithToLLVMConversionPass());
     pm.addPass(mlir::createConvertMathToLLVMPass());
 
@@ -87,7 +79,14 @@ public:
     funcToLLVMOpts.useBarePtrCallConv = true;
     pm.addPass(mlir::createConvertFuncToLLVMPass(funcToLLVMOpts));
 
+    pm.addPass(mlir::memref::createExpandStridedMetadataPass());
+    pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
+
+    pm.addPass(mlir::createConvertOpenMPToLLVMPass());
+
     pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
   }
 };
 
