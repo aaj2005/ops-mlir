@@ -340,7 +340,7 @@ void JITEngine::compile() {
 }
 
 void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
-    // Each ops.par_loop was lowered to a standalone function named
+  // Each ops.par_loop was lowered to a standalone function named
   // "ops_par_loop_<kernel_name>_<queue_index>" taking one bare pointer per
   // ops_dat argument, in the order the loops were enqueued. We invoke them
   // one by one with the live data pointers.
@@ -368,6 +368,9 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
       return;
     }
   }
+
+  // Clear the queue
+  this->flush();
 }
 
 void JITEngine::compile_and_execute() {

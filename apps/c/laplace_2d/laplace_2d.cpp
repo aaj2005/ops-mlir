@@ -75,6 +75,8 @@ int main(int argc, const char **argv) {
   int top_range[] = {-1, imax + 1, jmax, jmax + 1};
   ops_par_loop(set_zero, "set_zero", block, 2, top_range,
                ops_arg_dat(d_A, 1, S2D_00, "double", OPS_WRITE));
+	
+	compile_and_execute();
 
   int left_range[] = {-1, 0, -1, jmax + 1};
   ops_par_loop(left_bndcon, "left_bndcon", block, 2, left_range,
@@ -84,7 +86,21 @@ int main(int argc, const char **argv) {
   ops_par_loop(right_bndcon, "right_bndcon", block, 2, right_range,
                ops_arg_dat(d_A, 1, S2D_00, "double", OPS_WRITE), ops_arg_idx());
 
+  double *a_data = reinterpret_cast<double *>(d_A->data);
+  size_t a_count =
+      static_cast<size_t>(d_A->size[0]) * static_cast<size_t>(d_A->size[1]);
+
   compile_and_execute();
+
+	// Print samples from left boundaries
+	printf("sample values: A[0]=%f A[%d]=%f A[%d]=%f\n", a_data[0], jmax / 2,
+				 a_data[jmax / 2], jmax, a_data[jmax]);
+	
+	// Print samples from right boundaries
+	printf("sample values: A[%d]=%f A[%d]=%f A[%d]=%f\n", 
+		(imax + 1) * (jmax + 2), a_data[(imax + 1) * (jmax + 2)], 
+		(imax + 1) * (jmax + 2) + jmax / 2, a_data[(imax + 1) * (jmax + 2) + jmax / 2], 
+		(imax + 1) * (jmax + 2) + jmax, a_data[(imax + 1) * (jmax + 2) + jmax]);
 
   ops_printf("Jacobi relaxation Calculation: %d x %d mesh\n", imax + 2,
              jmax + 2);
