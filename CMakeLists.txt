@@ -61,12 +61,28 @@ if(OPS_ENABLE_CUDA)
   find_package(CUDAToolkit REQUIRED)
 endif()
 
+#===============================================================================
+# OpenMP Setup
+#===============================================================================
+# omp.h and libomp.so live in the OpenMP runtime build alongside LLVM.
+# Derive the path from MLIR_BUILD_DIR (same LLVM tree) — no extra env var needed.
+cmake_path(GET MLIR_BUILD_DIR PARENT_PATH LLVM_PROJECT_DIR)
+set(OMP_RUNTIME_DIR "${LLVM_PROJECT_DIR}/openmp/build/runtime/src")
+if(NOT EXISTS "${OMP_RUNTIME_DIR}/omp.h")
+  message(FATAL_ERROR "omp.h not found at ${OMP_RUNTIME_DIR}. "
+    "Ensure the LLVM OpenMP runtime was built in-tree alongside MLIR_BUILD_DIR.")
+endif()
+
+add_compile_options(-fopenmp)
+add_link_options(-fopenmp)
 
 #===============================================================================
 # Project Structure
 #===============================================================================
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${OPS_INCLUDE_DIR})
+include_directories(${OMP_RUNTIME_DIR})
+link_directories(${OMP_RUNTIME_DIR})
 include_directories(${MLIR_INCLUDE_DIRS})
 include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)

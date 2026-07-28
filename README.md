@@ -63,10 +63,15 @@ source env_setup
 ### 4. Build ops-mlir
 
 ```bash
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++
+cmake --build build -j$(nproc)
 ```
+
+The project must be compiled with the clang++ bundled in the LLVM build
+(`$MLIR_BUILD_DIR/bin/clang++`, added to `PATH` by `env_setup`). GCC 12 is
+incompatible with the generated MLIR headers in LLVM 23. The OpenMP
+headers and library are located automatically from `MLIR_BUILD_DIR` — no
+extra env vars or `-D` flags are needed.
 
 CMake configuration will fail with a clear error if any of the five
 environment variables above are not set.

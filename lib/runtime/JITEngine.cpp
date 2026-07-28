@@ -268,13 +268,13 @@ void JITEngine::runBackendLowering(mlir::ModuleOp module, Backend backend) {
     pipeline = std::make_unique<OpenMPPipeline>();
     break;
   case Backend::CUDA:
-    #ifdef OPS_ENABLE_CUDA
-      pipeline = std::make_unique<CudaPipeline>(detectNVGpuSm());
-    #else
-      throw std::runtime_error(
-          "CUDA backend requested but this build was compiled without "
-          "CUDA support (OPS_ENABLE_CUDA=OFF).");
-    #endif
+#ifdef OPS_ENABLE_CUDA
+    pipeline = std::make_unique<CudaPipeline>(detectNVGpuSm());
+#else
+    throw std::runtime_error(
+        "CUDA backend requested but this build was compiled without "
+        "CUDA support (OPS_ENABLE_CUDA=OFF).");
+#endif
     break;
   }
 
