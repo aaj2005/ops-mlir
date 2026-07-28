@@ -13,11 +13,12 @@ from xdsl.passes import ModulePass
 from ops_dialect import ArgType, Access, DatAttr, ParLoopOp
 
 def field_bounds(dat: DatAttr) -> list[tuple[int, int]]:
-    """Per-dim (lb, ub) bounds of the full allocated (halo-included) field."""
-    return [
-        (d_m, size + d_p)
-        for d_m, size, d_p in zip(dat.d_m_list, dat.size_list, dat.d_p_list)
-    ]
+    """Normalized 0-based field bounds: lb=0, ub=full allocated size per dim."""
+    return [(0, size) for size in dat.size_list]
+
+def halo_offsets(dat_args) -> list[int]:
+    """Per-dim d_m values (negative) from the first dat — shared across all dats on a block."""
+    return list(dat_args[0].dat.d_m_list)
 
 def stencil_points(ndim: int) -> list[tuple[int, ...]]:
     """Defaults to a single (0, ..., 0) access point -- see module docstring."""
@@ -26,6 +27,9 @@ def stencil_points(ndim: int) -> list[tuple[int, ...]]:
 def range_bounds(rng: list[int], ndim: int) -> list[tuple[int, int]]:
     return [(rng[2 * i], rng[2 * i + 1]) for i in range(ndim)]
 
+def normalized_range_bounds(rng: list[int], d_m: list[int], ndim: int) -> list[tuple[int, int]]:
+    """Shift OPS iteration range by -d_m so bounds are relative to normalized (0-based) field."""
+    return [(lb - dm, ub - dm) for (lb, ub), dm in zip(range_bounds(rng, ndim), d_m)]
 
 def declare_kernel(
     module: ModuleOp, name: str, num_f64_args: int, num_idx_args: int, num_results: int
@@ -50,8 +54,9 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
     dat_args = [a for a in args if a.argtype.data == ArgType.DAT]
     num_idx_args = sum(1 for a in args if a.argtype.data == ArgType.IDX)
 
+    d_m = halo_offsets(dat_args)
     apply_bounds = stencil.StencilBoundsAttr(
-        range_bounds(list(op.range.get_values()), ndim)
+        normalized_range_bounds(list(op.range.get_values()), d_m, ndim)
     )
 
     field_types = [stencil.FieldType(field_bounds(arg.dat), f64) for arg in dat_args]
@@ -88,14 +93,17 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
     # ops_arg_idx(): one stencil.index per dimension, per idx argument, no
     # static shift -- mirrors lib/passes/OPSToStencil.cpp.
     idx_results = []
-    zero_offset = stencil.IndexAttr.from_indices(*([0] * ndim))
+    # Offset d_m[dim] un-normalizes the loop index back to the OPS global index:
+    # ops_global_idx = normalized_loop_idx + d_m  (d_m is negative, e.g. -1)
     for _ in range(num_idx_args):
         for d in range(ndim):
             idx_op = block_builder.insert(
                 stencil.IndexOp.build(
                     attributes={
                         "dim": IntegerAttr(d, IndexType()),
-                        "offset": zero_offset,
+                        "offset": stencil.IndexAttr.from_indices(*[
+                            d_m[i] if i == d else 0 for i in range(ndim)
+                        ]),
                     },
                     result_types=[IndexType()],
                 )
