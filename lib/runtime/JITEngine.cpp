@@ -307,16 +307,21 @@ void JITEngine::runBackendLowering(mlir::ModuleOp module, Backend backend) {
     return;
   }
 
+#ifdef OPS_ENABLE_DEBUG
   llvm::outs() << "=== BACKEND-LOWERED MLIR IR ===\n\n";
   module.print(llvm::outs());
   llvm::outs() << "\n";
+#endif
 }
 
 void JITEngine::compile() {
   module = builder.buildModule(queue_);
 
   std::string ir = builder.moduleToString(module);
+
+#ifdef OPS_ENABLE_DEBUG
   llvm::outs() << "=== OPS.PAR_LOOP MLIR IR ===\n\n" << ir << "\n";
+#endif
 
   XdslResult lowered = runXdslLowering(ir);
   if (!lowered.success) {
@@ -324,8 +329,10 @@ void JITEngine::compile() {
     return;
   }
   
+#ifdef OPS_ENABLE_DEBUG
   llvm::outs() << "=== LOWERED STENCIL IR (xDSL, in-process) ===\n\n"
             << lowered.ir << "\n";
+#endif
 
   loweredModule_ =
     mlir::parseSourceString<mlir::ModuleOp>(lowered.ir, &ctx);
