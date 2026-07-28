@@ -384,7 +384,32 @@ void JITEngine::compile_and_execute() {
     return;
   }
 
-  execute(std::move(*engineOrErr));
+  auto engine = std::move(*engineOrErr);
+
+  switch (backend_) {
+  case Backend::Sequential:
+  case Backend::OpenMP:
+    registerCpuKernelSymbols(*engine);
+    break;
+  case Backend::CUDA:
+    // Kernels should be added to the Host side. CPU side symbols are not valid.
+    break;
+  }
+
+  execute(std::move(engine));
+}
+
+void JITEngine::registerCpuKernelSymbols(mlir::ExecutionEngine &engine) {
+  engine.registerSymbols([this](llvm::orc::MangleAndInterner interner) {
+    llvm::orc::SymbolMap symbolMap;
+    for (const LoopDesc &loop : queue_) {
+      void *kernelPtr = reinterpret_cast<void *>(loop.kernel_token);
+      symbolMap[interner(loop.kernel_name)] = {
+          llvm::orc::ExecutorAddr::fromPtr(kernelPtr),
+          llvm::JITSymbolFlags::Exported};
+    }
+    return symbolMap;
+  });
 }
 
 const char *accessToString(int access) {

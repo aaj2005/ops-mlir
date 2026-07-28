@@ -79,6 +79,7 @@ private:
 
   void compile();
   void execute(std::unique_ptr<mlir::ExecutionEngine> engine);
+  void registerCpuKernelSymbols(mlir::ExecutionEngine &engine);
 
 private:
   Backend backend_ = kDefaultBackend;
