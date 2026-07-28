@@ -84,8 +84,7 @@ int main(int argc, const char **argv) {
   ops_par_loop(right_bndcon, "right_bndcon", block, 2, right_range,
                ops_arg_dat(d_A, 1, S2D_00, "double", OPS_WRITE), ops_arg_idx());
 
-  compile();
-  execute();
+  compile_and_execute();
 
   ops_printf("Jacobi relaxation Calculation: %d x %d mesh\n", imax + 2,
              jmax + 2);

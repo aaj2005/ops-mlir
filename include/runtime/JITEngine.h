@@ -43,9 +43,7 @@ public:
 
   void flush();
 
-  void compile();
-
-  void execute();
+  void compile_and_execute();
 
   void setBackend(Backend backend) { backend_ = backend; }
   Backend backend() const { return backend_; }
@@ -61,7 +59,7 @@ private:
 
   mlir::MLIRContext ctx;
   mlir::ModuleOp module;
-  std::unique_ptr<mlir::ExecutionEngine> engine;
+  mlir::OwningOpRef<mlir::ModuleOp> loweredModule_;
 
   IRBuilder builder{&ctx};
 
@@ -78,6 +76,9 @@ private:
 
   void runBackendLowering(mlir::ModuleOp module, Backend backend);
   std::string detectNVGpuSm();
+
+  void compile();
+  void execute(std::unique_ptr<mlir::ExecutionEngine> engine);
 
 private:
   Backend backend_ = kDefaultBackend;

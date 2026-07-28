@@ -327,39 +327,20 @@ void JITEngine::compile() {
   llvm::outs() << "=== LOWERED STENCIL IR (xDSL, in-process) ===\n\n"
             << lowered.ir << "\n";
 
-  mlir::OwningOpRef<mlir::ModuleOp> loweredModule = 
+  loweredModule_ =
     mlir::parseSourceString<mlir::ModuleOp>(lowered.ir, &ctx);
-  
-  if (!loweredModule) {
+
+  if (!loweredModule_) {
     llvm::errs() << "Failed to parse xDSL output as MLIR\n";
     return;
   }
 
-  runBackendLowering(*loweredModule,  backend_);
-  module = *loweredModule;
-
-  mlir::ExecutionEngineOptions engineOptions;
-  engineOptions.transformer = mlir::makeOptimizingTransformer(
-      /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
-
-  auto engineOrErr = mlir::ExecutionEngine::create(module, engineOptions);
-  if (!engineOrErr) {
-    llvm::errs() << "Failed to create ExecutionEngine: "
-                  << llvm::toString(engineOrErr.takeError()) << "\n";
-    return;
-  }
-
-  engine = std::move(*engineOrErr);
+  runBackendLowering(*loweredModule_, backend_);
+  module = *loweredModule_;
 }
 
-void JITEngine::execute() {
-  if (!engine) {
-    llvm::errs() << "JITEngine::execute: no compiled module (call compile() "
-                    "first)\n";
-    return;
-  }
-
-  // Each ops.par_loop was lowered to a standalone function named
+void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
+    // Each ops.par_loop was lowered to a standalone function named
   // "ops_par_loop_<kernel_name>_<queue_index>" taking one bare pointer per
   // ops_dat argument, in the order the loops were enqueued. We invoke them
   // one by one with the live data pointers.
@@ -387,6 +368,23 @@ void JITEngine::execute() {
       return;
     }
   }
+}
+
+void JITEngine::compile_and_execute() {
+  compile();
+
+  mlir::ExecutionEngineOptions engineOptions;
+  engineOptions.transformer = mlir::makeOptimizingTransformer(
+      /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
+
+  auto engineOrErr = mlir::ExecutionEngine::create(module, engineOptions);
+  if (!engineOrErr) {
+    llvm::errs() << "Failed to create ExecutionEngine: "
+                  << llvm::toString(engineOrErr.takeError()) << "\n";
+    return;
+  }
+
+  execute(std::move(*engineOrErr));
 }
 
 const char *accessToString(int access) {
@@ -431,7 +429,7 @@ std::optional<Backend> parseBackendName(const std::string &name) {
 }
 
 
-Backend JITEngine ::resolveBackend(int argc, char **argv) {
+Backend JITEngine::resolveBackend(int argc, char **argv) {
   // Explicit CLI flag takes precendence
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
