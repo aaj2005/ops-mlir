@@ -1,5 +1,6 @@
 #include "runtime/JITEngine.h"
 #include "runtime/BackendPipeline.h"
+#include "mlir/InitAllExtensions.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -18,6 +19,7 @@
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
 #include "mlir/ExecutionEngine/OptUtils.h"
 #include "mlir/Target/LLVMIR/Dialect/All.h"
+#include "mlir/Target/LLVM/NVVM/Target.h"
 #include "llvm/Support/TargetSelect.h"
 
 #include <algorithm>
@@ -58,11 +60,11 @@ JITEngine::JITEngine() {
   ctx.getOrLoadDialect<mlir::cf::ControlFlowDialect>();
   ctx.getOrLoadDialect<mlir::math::MathDialect>();
 
-  // Needed by ExecutionEngine::create to translate the lowered module to
-  // LLVM IR; without these, translation fails with "missing
-  // LLVMTranslationDialectInterface registration".
+  // Register Interfaces
   mlir::DialectRegistry registry;
   mlir::registerAllToLLVMIRTranslations(registry);
+  mlir::registerAllExtensions(registry);
+  mlir::NVVM::registerNVVMTargetInterfaceExternalModels(registry);
   ctx.appendDialectRegistry(registry);
 
   // Needed so the JIT's target machine can be created for the host triple;
@@ -110,19 +112,24 @@ std::string JITEngine::detectNVGpuSm() {
 #ifdef OPS_ENABLE_CUDA
   if (cuInit(0) != CUDA_SUCCESS) {
     throw std::runtime_error(
-        "cuInit failed -- no NVIDIA driver found. Set OPS_GPU_SM manually.");
+        "cuInit failed -- no NVIDIA driver found. Set OPS_GPU_SM manually (e.g. \"sm_86\").");
   }
   CUdevice device;
   cuDeviceGet(&device, 0);
   int major = 0, minor = 0;
   cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device);
   cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device);
-  return std::to_string(major) + std::to_string(minor);
+  // mlir::NVVM::NVVMTargetAttr's "chip" field (consumed by
+  // GpuNVVMAttachTargetOptions::chip) must be in "sm_NN"/"compute_NN" form;
+  // its verifier unconditionally strips a known prefix and asserts on a
+  // bare digit string like "75" (see NVVMTargetAttr::verifyTarget).
+  return "sm_" + std::to_string(major) + std::to_string(minor);
 #else
   throw std::runtime_error(
       "This build was compiled without CUDA support (OPS_ENABLE_CUDA=OFF). "
       "Reconfigure with -DOPS_ENABLE_CUDA=ON to use the CUDA backend, or "
-      "set OPS_GPU_SM manually if targeting a remote/precompiled binary.");
+      "set OPS_GPU_SM manually (e.g. \"sm_86\") if targeting a remote/"
+      "precompiled binary.");
 #endif
 }
 
