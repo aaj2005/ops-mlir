@@ -99,6 +99,21 @@ private:
   // Translates a kernel body from C++ source into MLIR for the GPU backend, materializing
   void materializeGpuKernel(const std::string &kernelName, int indexRank);
 
+  // Returns the device buffer mirroring the given host `ops_dat` buffer,
+  // allocating it (via cuMemAlloc) on first use. Kernels compiled for the
+  // CUDA backend operate on device memory, not the host pointers `dat`
+  // args normally carry, so execute() copies host->device before each
+  // launch and device->host after for any dat the kernel writes. A no-op
+  // returning 0 when built without OPS_ENABLE_CUDA.
+  //
+  // Note: unconditionally declared (not #ifdef OPS_ENABLE_CUDA) even
+  // though only meaningful for CUDA builds -- OPS_ENABLE_CUDA is only
+  // defined PRIVATE for the OPSRuntime target, so consumer translation
+  // units (e.g. apps linking against it) never see that macro; gating a
+  // class member on it here would make JITEngine's layout depend on
+  // which TU compiles it, an ODR violation.
+  std::uintptr_t ensureDeviceBuffer(std::uintptr_t hostPtr, std::size_t bytes);
+
 private:
   Backend backend_ = kDefaultBackend;
   std::mutex mutex_;
@@ -106,6 +121,10 @@ private:
   FlushCallback flushCallback_;
   std::string kernelSourceFile_;
   std::map<std::string, const void *> kernelConstants_;
+  // Host ops_dat pointer -> device pointer (stored as uintptr_t to keep
+  // this header CUDA-toolkit-header-free; only populated/used when built
+  // with OPS_ENABLE_CUDA).
+  std::map<std::uintptr_t, std::uintptr_t> deviceBuffers_;
 };
 
 const char *accessToString(int access);

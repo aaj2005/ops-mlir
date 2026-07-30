@@ -404,19 +404,88 @@ void JITEngine::materializeGpuKernel(const std::string &kernelName,
   loweredModule_->push_back(translatedFn);
 }
 
+static std::size_t datByteSize(const DatDesc &dat) {
+  std::size_t total = static_cast<std::size_t>(dat.elem_size);
+  for (int64_t dim : dat.size)
+    total *= static_cast<std::size_t>(dim);
+  return total;
+}
+
+std::uintptr_t JITEngine::ensureDeviceBuffer(std::uintptr_t hostPtr,
+                                             std::size_t bytes) {
+#ifdef OPS_ENABLE_CUDA
+  auto it = deviceBuffers_.find(hostPtr);
+  if (it != deviceBuffers_.end())
+    return it->second;
+
+  // Use the same (primary) CUDA context mlir_cuda_runtime's wrappers use
+  // (see CudaRuntimeWrappers.cpp's ScopedContext), so buffers allocated
+  // here are valid in the kernels that runtime launches.
+  static bool contextReady = [] {
+    cuInit(0);
+    CUdevice device;
+    cuDeviceGet(&device, 0);
+    CUcontext ctx;
+    cuDevicePrimaryCtxRetain(&ctx, device);
+    cuCtxSetCurrent(ctx);
+    return true;
+  }();
+  (void)contextReady;
+
+  CUdeviceptr devPtr = 0;
+  if (CUresult rc = cuMemAlloc(&devPtr, bytes); rc != CUDA_SUCCESS) {
+    llvm::errs() << "ensureDeviceBuffer: cuMemAlloc failed (CUresult " << rc
+                 << ")\n";
+    return 0;
+  }
+  deviceBuffers_[hostPtr] = devPtr;
+  return devPtr;
+#else
+  (void)hostPtr;
+  (void)bytes;
+  return 0;
+#endif
+}
+
 void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
   // Each ops.par_loop was lowered to a standalone function named
   // "ops_par_loop_<kernel_name>_<queue_index>" taking one bare pointer per
   // ops_dat argument, in the order the loops were enqueued. We invoke them
   // one by one with the live data pointers.
+  //
+  // For the CUDA backend, the compiled kernel operates on device memory,
+  // not the host `ops_dat` buffer: each dat arg is mirrored into a device
+  // buffer (allocated/cached by ensureDeviceBuffer), copied host->device
+  // before the launch, and copied back device->host afterwards for any
+  // dat the kernel writes, so host code and later CPU-side loops always
+  // see up-to-date contents.
   for (std::size_t i = 0; i < queue_.size(); ++i) {
     const LoopDesc &loop = queue_[i];
     std::string funcName =
         "ops_par_loop_" + loop.kernel_name + "_" + std::to_string(i);
 
     std::vector<void *> datPtrs;
+    std::vector<std::pair<std::uintptr_t, std::size_t>> writebacks;
     for (const ArgDesc &arg : loop.args) {
-      if (arg.argtype == OPS_ARG_DAT) {
+      if (arg.argtype != OPS_ARG_DAT)
+        continue;
+
+      if (backend_ == Backend::CUDA) {
+        std::size_t bytes = datByteSize(arg.dat);
+        std::uintptr_t devPtr = ensureDeviceBuffer(arg.data, bytes);
+        if (!devPtr) {
+          llvm::errs() << "Failed to allocate device buffer for '"
+                       << funcName << "'\n";
+          this->flush();
+          return;
+        }
+#ifdef OPS_ENABLE_CUDA
+        cuMemcpyHtoD(devPtr, reinterpret_cast<const void *>(arg.data), bytes);
+#endif
+        datPtrs.push_back(reinterpret_cast<void *>(devPtr));
+        if (arg.acc == OPS_WRITE || arg.acc == OPS_RW || arg.acc == OPS_INC)
+          writebacks.emplace_back(arg.data, bytes);
+      } else {
         datPtrs.push_back(reinterpret_cast<void *>(arg.data));
       }
     }
@@ -433,6 +502,13 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
       this->flush();
       return;
     }
+
+#ifdef OPS_ENABLE_CUDA
+    for (const auto &[hostPtr, bytes] : writebacks) {
+      std::uintptr_t devPtr = ensureDeviceBuffer(hostPtr, bytes);
+      cuMemcpyDtoH(reinterpret_cast<void *>(hostPtr), devPtr, bytes);
+    }
+#endif
   }
 
   // Clear the queue
