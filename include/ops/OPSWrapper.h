@@ -43,4 +43,14 @@ void compile_and_execute() {
   ops_mlir::JITEngine::instance().compile_and_execute();
 }
 
+// Equvalent to ops_decl_const
+template <typename T>
+void ops_register_kernel_constant(const char *name, T *data) {
+  ops_mlir::JITEngine::instance().registerKernelConstant(name, data);
+}
+
+void set_kernel_source_file(const std::string &filePath) {
+  ops_mlir::JITEngine::instance().setKernelSourceFile(filePath);
+}
+
 #endif // OPS_WRAPPER_H

@@ -1,5 +1,6 @@
 #include "runtime/JITEngine.h"
 #include "runtime/BackendPipeline.h"
+#include "runtime/KernelIRBuilder.h"
 #include "mlir/InitAllExtensions.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Parser/Parser.h"
@@ -20,6 +21,7 @@
 #include "mlir/ExecutionEngine/OptUtils.h"
 #include "mlir/Target/LLVMIR/Dialect/All.h"
 #include "mlir/Target/LLVM/NVVM/Target.h"
+#include "mlir/Dialect/LLVMIR/Transforms/InlinerInterfaceImpl.h"
 #include "llvm/Support/TargetSelect.h"
 
 #include <algorithm>
@@ -65,6 +67,7 @@ JITEngine::JITEngine() {
   mlir::registerAllToLLVMIRTranslations(registry);
   mlir::registerAllExtensions(registry);
   mlir::NVVM::registerNVVMTargetInterfaceExternalModels(registry);
+  mlir::LLVM::registerInlinerInterface(registry);
   ctx.appendDialectRegistry(registry);
 
   // Needed so the JIT's target machine can be created for the host triple;
@@ -119,10 +122,6 @@ std::string JITEngine::detectNVGpuSm() {
   int major = 0, minor = 0;
   cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device);
   cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device);
-  // mlir::NVVM::NVVMTargetAttr's "chip" field (consumed by
-  // GpuNVVMAttachTargetOptions::chip) must be in "sm_NN"/"compute_NN" form;
-  // its verifier unconditionally strips a known prefix and asserts on a
-  // bare digit string like "75" (see NVVMTargetAttr::verifyTarget).
   return "sm_" + std::to_string(major) + std::to_string(minor);
 #else
   throw std::runtime_error(
@@ -349,8 +348,60 @@ void JITEngine::compile() {
     return;
   }
 
+  if (backend_ == Backend::CUDA) {
+    // GPU kernel bodies can't be resolved by linking a compiled host
+    // symbol (device code can't call back into host object code), so the
+    // real kernel definition has to be materialized as MLIR and spliced
+    // in before outlining, replacing the empty `func.func private
+    // @kernel(...)` declaration the xDSL lowering left behind.
+    std::vector<std::pair<std::string, int>> kernels;
+    for (const LoopDesc &loop : queue_) {
+      bool seen = std::any_of(
+          kernels.begin(), kernels.end(),
+          [&](const auto &k) { return k.first == loop.kernel_name; });
+      if (!seen)
+        kernels.emplace_back(loop.kernel_name, loop.dims);
+    }
+    for (const auto &[name, dims] : kernels) {
+      materializeGpuKernel(name, dims);
+    }
+  }
+
   runBackendLowering(*loweredModule_, backend_);
   module = *loweredModule_;
+}
+
+void JITEngine::materializeGpuKernel(const std::string &kernelName,
+                                     int indexRank) {
+  if (kernelSourceFile_.empty()) {
+    llvm::errs() << "materializeGpuKernel: no kernel source file set "
+                    "(call setKernelSourceFile), cannot translate '"
+                 << kernelName << "' for the GPU backend\n";
+    return;
+  }
+
+  mlir::func::FuncOp declOp;
+  loweredModule_->walk([&](mlir::func::FuncOp fn) {
+    if (fn.getSymName() == kernelName && fn.isDeclaration())
+      declOp = fn;
+  });
+  if (!declOp) {
+    // Already materialized (e.g. a prior loop with the same kernel name),
+    // or not present in this module -- nothing to do.
+    return;
+  }
+
+  KernelIRBuilder kernelBuilder(ctx);
+  mlir::func::FuncOp translatedFn = kernelBuilder.generate(
+      kernelSourceFile_, kernelName, indexRank, kernelConstants_, llvm::errs());
+  if (!translatedFn) {
+    llvm::errs() << "materializeGpuKernel: could not translate '"
+                 << kernelName << "' from " << kernelSourceFile_ << "\n";
+    return;
+  }
+
+  declOp.erase();
+  loweredModule_->push_back(translatedFn);
 }
 
 void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
@@ -379,6 +430,7 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
     if (auto err = engine->invokePacked(funcName, packedArgs)) {
       llvm::errs() << "Failed to invoke '" << funcName
                    << "': " << llvm::toString(std::move(err)) << "\n";
+      this->flush();
       return;
     }
   }
@@ -393,6 +445,23 @@ void JITEngine::compile_and_execute() {
   mlir::ExecutionEngineOptions engineOptions;
   engineOptions.transformer = mlir::makeOptimizingTransformer(
       /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
+
+  // gpu.launch_func lowers to calls into MLIR's CUDA driver-API wrappers
+  // (mgpuLaunchKernel, mgpuStreamCreate, ...); the JIT needs
+  // libmlir_cuda_runtime.so loaded to resolve them. Path is
+  // environment/build-specific (this LLVM tree's MLIR_ENABLE_CUDA_RUNNER
+  // build), so it's read from an env var rather than hardcoded.
+  std::string cudaRuntimePath;
+  if (backend_ == Backend::CUDA) {
+    if (const char *path = std::getenv("OPS_MLIR_CUDA_RUNTIME")) {
+      cudaRuntimePath = path;
+      engineOptions.sharedLibPaths = {cudaRuntimePath};
+    } else {
+      llvm::errs() << "Warning: OPS_MLIR_CUDA_RUNTIME not set; GPU kernel "
+                     "launches will fail to resolve mgpu* symbols. Set it "
+                     "to the path of libmlir_cuda_runtime.so.\n";
+    }
+  }
 
   auto engineOrErr = mlir::ExecutionEngine::create(module, engineOptions);
   if (!engineOrErr) {

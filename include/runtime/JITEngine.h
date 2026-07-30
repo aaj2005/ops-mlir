@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -48,6 +49,20 @@ public:
   void setBackend(Backend backend) { backend_ = backend; }
   Backend backend() const { return backend_; }
 
+  // Needed for GPU backend kernel translation (via KernelIRBuilder) to materialize real MLIR
+  void setKernelSourceFile(std::string path) {
+    kernelSourceFile_ = std::move(path);
+  }
+
+  // Register extern global kernel constants (e.g. pi, jmax) for translation into MLIR 
+  void registerKernelConstant(const std::string &name, const void *ptr) {
+    kernelConstants_[name] = ptr;
+  }
+
+  const std::map<std::string, const void *> &kernelConstants() const {
+    return kernelConstants_;
+  }
+
   // Note - resolveBackend is currently unused. This gives the option of a
   Backend resolveBackend(int argc, char **argv);
 
@@ -81,11 +96,16 @@ private:
   void execute(std::unique_ptr<mlir::ExecutionEngine> engine);
   void registerCpuKernelSymbols(mlir::ExecutionEngine &engine);
 
+  // Translates a kernel body from C++ source into MLIR for the GPU backend, materializing
+  void materializeGpuKernel(const std::string &kernelName, int indexRank);
+
 private:
   Backend backend_ = kDefaultBackend;
   std::mutex mutex_;
   std::vector<LoopDesc> queue_;
   FlushCallback flushCallback_;
+  std::string kernelSourceFile_;
+  std::map<std::string, const void *> kernelConstants_;
 };
 
 const char *accessToString(int access);
