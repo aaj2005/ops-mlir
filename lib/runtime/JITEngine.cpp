@@ -439,6 +439,7 @@ std::uintptr_t JITEngine::ensureDeviceBuffer(std::uintptr_t hostPtr,
     return 0;
   }
   deviceBuffers_[hostPtr] = devPtr;
+  cuMemcpyHtoD(devPtr, reinterpret_cast<const void *>(hostPtr), bytes);
   return devPtr;
 #else
   (void)hostPtr;
@@ -479,9 +480,6 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
           this->flush();
           return;
         }
-#ifdef OPS_ENABLE_CUDA
-        cuMemcpyHtoD(devPtr, reinterpret_cast<const void *>(arg.data), bytes);
-#endif
         datPtrs.push_back(reinterpret_cast<void *>(devPtr));
         if (arg.acc == OPS_WRITE || arg.acc == OPS_RW || arg.acc == OPS_INC)
           writebacks.emplace_back(arg.data, bytes);
