@@ -517,8 +517,9 @@ void JITEngine::compile_and_execute() {
   compile();
 
   mlir::ExecutionEngineOptions engineOptions;
-  engineOptions.transformer = mlir::makeOptimizingTransformer(
-      /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
+  auto transformer = mlir::makeOptimizingTransformer(
+    /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
+  engineOptions.transformer = transformer;
 
   // gpu.launch_func lowers to calls into MLIR's CUDA driver-API wrappers
   // (mgpuLaunchKernel, mgpuStreamCreate, ...); the JIT needs
