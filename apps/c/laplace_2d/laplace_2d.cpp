@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 
 int imax, jmax;
 double pi = 2.0 * asin(1.0);
@@ -13,6 +14,13 @@ double pi = 2.0 * asin(1.0);
 #include "./laplace_kernels.h"
 
 int main(int argc, const char **argv) {
+  // Register kernel source file with JITEngine
+  {
+    std::string thisFile = __FILE__;
+    std::string dir = thisFile.substr(0, thisFile.find_last_of('/'));
+    set_kernel_source_file(dir + "/laplace_kernels.h");
+  }
+
   // Initialise the OPS library, passing runtime args, and setting diagnostics
   // level to low (1)
   ops_init(argc, argv, 1);
@@ -58,6 +66,12 @@ int main(int argc, const char **argv) {
   ops_decl_const("4094", 1, "int", &jmax);
   ops_decl_const("pi", 1, "double", &pi);
 
+  // Makes these visible to kernel bodies translated for the CUDA backend
+  // (left_bndcon/right_bndcon reference `jmax`/`pi` directly) -- see
+  // KernelIRBuilder.
+  ops_register_kernel_constant("jmax", &jmax);
+  ops_register_kernel_constant("pi", &pi);
+
   ops_partition("");
 
   // memset
@@ -85,17 +99,17 @@ int main(int argc, const char **argv) {
                ops_arg_dat(d_A, 1, S2D_00, "double", OPS_WRITE), ops_arg_idx());
 
   // set boundary conditions for Anew
-  ops_par_loop(set_zero, "set zero", block, 2, bottom_range,
+  ops_par_loop(set_zero, "set_zero", block, 2, bottom_range,
       ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE));
 
-  ops_par_loop(set_zero, "set zero", block, 2, top_range,
+  ops_par_loop(set_zero, "set_zero", block, 2, top_range,
       ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE));
 
-  ops_par_loop(left_bndcon, "left bndcon", block, 2, left_range,
+  ops_par_loop(left_bndcon, "left_bndcon", block, 2, left_range,
       ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE),
       ops_arg_idx());
 
-  ops_par_loop(right_bndcon, "right bndcon", block, 2, right_range,
+  ops_par_loop(right_bndcon, "right_bndcon", block, 2, right_range,
       ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE),
       ops_arg_idx());
 
@@ -103,20 +117,20 @@ int main(int argc, const char **argv) {
 
   int iter = 0;
 
-  while (iter < iter_max) {
-    int interior_range[] = {0,imax,0,jmax};
-    ops_par_loop(apply_stencil, "apply stencil", block, 2, interior_range,
-        ops_arg_dat(d_A,    1, S2D_5pt, "double", OPS_READ),
-        ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE),
-        ops_arg_reduce(h_err, 1, "double", OPS_MAX));
+//   while (iter < iter_max) {
+    // int interior_range[] = {0,imax,0,jmax};
+    // ops_par_loop(apply_stencil, "apply_stencil", block, 2, interior_range,
+    //     ops_arg_dat(d_A,    1, S2D_5pt, "double", OPS_READ),
+    //     ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE),
+    //     ops_arg_reduce(h_err, 1, "double", OPS_MAX));
       
-    ops_par_loop(copy, "copy", block, 2, interior_range,
-        ops_arg_dat(d_A,    1, S2D_00, "double", OPS_WRITE),
-        ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_READ));
+    // ops_par_loop(copy, "copy", block, 2, interior_range,
+    //     ops_arg_dat(d_A,    1, S2D_00, "double", OPS_WRITE),
+    //     ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_READ));
 
     compile_and_execute();
-    ++iter;
-  }
+//     ++iter;
+//   }
 
   double *anew_data = reinterpret_cast<double *>(d_Anew->data);
   int stride = d_Anew->size[1];
