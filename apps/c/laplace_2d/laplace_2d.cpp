@@ -117,20 +117,20 @@ int main(int argc, const char **argv) {
 
   int iter = 0;
 
-//   while (iter < iter_max) {
-    // int interior_range[] = {0,imax,0,jmax};
-    // ops_par_loop(apply_stencil, "apply_stencil", block, 2, interior_range,
-    //     ops_arg_dat(d_A,    1, S2D_5pt, "double", OPS_READ),
-    //     ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE),
-    //     ops_arg_reduce(h_err, 1, "double", OPS_MAX));
+  while (iter < iter_max) {
+    int interior_range[] = {0,imax,0,jmax};
+    ops_par_loop(apply_stencil, "apply_stencil", block, 2, interior_range,
+        ops_arg_dat(d_A,    1, S2D_5pt, "double", OPS_READ),
+        ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_WRITE),
+        ops_arg_reduce(h_err, 1, "double", OPS_MAX));
       
-    // ops_par_loop(copy, "copy", block, 2, interior_range,
-    //     ops_arg_dat(d_A,    1, S2D_00, "double", OPS_WRITE),
-    //     ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_READ));
+    ops_par_loop(copy, "copy", block, 2, interior_range,
+        ops_arg_dat(d_A,    1, S2D_00, "double", OPS_WRITE),
+        ops_arg_dat(d_Anew, 1, S2D_00, "double", OPS_READ));
 
     compile_and_execute();
-//     ++iter;
-//   }
+    ++iter;
+  }
 
   double *anew_data = reinterpret_cast<double *>(d_Anew->data);
   int stride = d_Anew->size[1];
