@@ -18,7 +18,7 @@ namespace ops_mlir {
 enum class Backend { Sequential, OpenMP, CUDA };
 
 std::optional<Backend> parseBackendName(const std::string &name);
-constexpr Backend kDefaultBackend = Backend::Sequential;
+constexpr Backend kDefaultBackend = Backend::OpenMP;
 
 static constexpr const char *kBackendFlagPrefix = "--backend=";
 static constexpr const char *kBackendEnvVar = "OPS_BACKEND";

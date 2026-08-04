@@ -311,6 +311,7 @@ void JITEngine::runBackendLowering(mlir::ModuleOp module, Backend backend) {
   llvm::outs() << "=== BACKEND-LOWERED MLIR IR ===\n\n";
   module.print(llvm::outs());
   llvm::outs() << "\n";
+  llvm::outs().flush();
 #endif
 }
 
@@ -321,6 +322,7 @@ void JITEngine::compile() {
 
 #ifdef OPS_ENABLE_DEBUG
   llvm::outs() << "=== OPS.PAR_LOOP MLIR IR ===\n\n" << ir << "\n";
+  llvm::outs().flush();
 #endif
 
   XdslResult lowered = runXdslLowering(ir);
@@ -332,6 +334,7 @@ void JITEngine::compile() {
 #ifdef OPS_ENABLE_DEBUG
   llvm::outs() << "=== LOWERED STENCIL IR (xDSL, in-process) ===\n\n"
             << lowered.ir << "\n";
+  llvm::outs().flush();
 #endif
 
   loweredModule_ =
@@ -369,6 +372,10 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
       packedArgs.push_back(&ptr);
     }
 
+#ifdef OPS_ENABLE_DEBUG
+    llvm::outs() << "About to invoke '" << funcName << "'\n";
+    llvm::outs().flush();
+#endif
     if (auto err = engine->invokePacked(funcName, packedArgs)) {
       llvm::errs() << "Failed to invoke '" << funcName
                    << "': " << llvm::toString(std::move(err)) << "\n";
@@ -384,8 +391,9 @@ void JITEngine::compile_and_execute() {
   compile();
 
   mlir::ExecutionEngineOptions engineOptions;
-  engineOptions.transformer = mlir::makeOptimizingTransformer(
-      /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
+  auto transformer = mlir::makeOptimizingTransformer(
+    /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
+  engineOptions.transformer = transformer;
 
   auto engineOrErr = mlir::ExecutionEngine::create(module, engineOptions);
   if (!engineOrErr) {
