@@ -1,5 +1,8 @@
 #include "runtime/JITEngine.h"
 #include "runtime/BackendPipeline.h"
+#include "runtime/KernelIRBuilder.h"
+#include "runtime/KernelProfiler.h"
+#include "mlir/InitAllExtensions.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -18,6 +21,8 @@
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
 #include "mlir/ExecutionEngine/OptUtils.h"
 #include "mlir/Target/LLVMIR/Dialect/All.h"
+#include "mlir/Target/LLVM/NVVM/Target.h"
+#include "mlir/Dialect/LLVMIR/Transforms/InlinerInterfaceImpl.h"
 #include "llvm/Support/TargetSelect.h"
 
 #include <algorithm>
@@ -58,11 +63,12 @@ JITEngine::JITEngine() {
   ctx.getOrLoadDialect<mlir::cf::ControlFlowDialect>();
   ctx.getOrLoadDialect<mlir::math::MathDialect>();
 
-  // Needed by ExecutionEngine::create to translate the lowered module to
-  // LLVM IR; without these, translation fails with "missing
-  // LLVMTranslationDialectInterface registration".
+  // Register Interfaces
   mlir::DialectRegistry registry;
   mlir::registerAllToLLVMIRTranslations(registry);
+  mlir::registerAllExtensions(registry);
+  mlir::NVVM::registerNVVMTargetInterfaceExternalModels(registry);
+  mlir::LLVM::registerInlinerInterface(registry);
   ctx.appendDialectRegistry(registry);
 
   // Needed so the JIT's target machine can be created for the host triple;
@@ -72,10 +78,12 @@ JITEngine::JITEngine() {
   llvm::InitializeNativeTargetAsmPrinter();
 
   // Resolve backend (without working CLI flags for now)
-  resolveBackend(0, nullptr);
+  backend_ = resolveBackend(0, nullptr);
 }
 
 JITEngine::~JITEngine() {
+  KernelProfiler::instance().report();
+
   if (Py_IsInitialized()) {
     Py_FinalizeEx();
   }
@@ -110,19 +118,20 @@ std::string JITEngine::detectNVGpuSm() {
 #ifdef OPS_ENABLE_CUDA
   if (cuInit(0) != CUDA_SUCCESS) {
     throw std::runtime_error(
-        "cuInit failed -- no NVIDIA driver found. Set OPS_GPU_SM manually.");
+        "cuInit failed -- no NVIDIA driver found. Set OPS_GPU_SM manually (e.g. \"sm_86\").");
   }
   CUdevice device;
   cuDeviceGet(&device, 0);
   int major = 0, minor = 0;
   cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device);
   cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device);
-  return std::to_string(major) + std::to_string(minor);
+  return "sm_" + std::to_string(major) + std::to_string(minor);
 #else
   throw std::runtime_error(
       "This build was compiled without CUDA support (OPS_ENABLE_CUDA=OFF). "
       "Reconfigure with -DOPS_ENABLE_CUDA=ON to use the CUDA backend, or "
-      "set OPS_GPU_SM manually if targeting a remote/precompiled binary.");
+      "set OPS_GPU_SM manually (e.g. \"sm_86\") if targeting a remote/"
+      "precompiled binary.");
 #endif
 }
 
@@ -345,8 +354,117 @@ void JITEngine::compile() {
     return;
   }
 
+  if (backend_ == Backend::CUDA) {
+    // GPU kernel bodies can't be resolved by linking a compiled host
+    // symbol (device code can't call back into host object code), so the
+    // real kernel definition has to be materialized as MLIR and spliced
+    // in before outlining, replacing the empty `func.func private
+    // @kernel(...)` declaration the xDSL lowering left behind.
+    std::vector<std::pair<std::string, int>> kernels;
+    for (const LoopDesc &loop : queue_) {
+      bool seen = std::any_of(
+          kernels.begin(), kernels.end(),
+          [&](const auto &k) { return k.first == loop.kernel_name; });
+      if (!seen)
+        kernels.emplace_back(loop.kernel_name, loop.dims);
+    }
+    for (const auto &[name, dims] : kernels) {
+      materializeGpuKernel(name, dims);
+    }
+  }
+
   runBackendLowering(*loweredModule_, backend_);
   module = *loweredModule_;
+}
+
+void JITEngine::materializeGpuKernel(const std::string &kernelName,
+                                     int indexRank) {
+  if (kernelSourceFile_.empty()) {
+    llvm::errs() << "materializeGpuKernel: no kernel source file set "
+                    "(call setKernelSourceFile), cannot translate '"
+                 << kernelName << "' for the GPU backend\n";
+    return;
+  }
+
+  mlir::func::FuncOp declOp;
+  loweredModule_->walk([&](mlir::func::FuncOp fn) {
+    if (fn.getSymName() == kernelName && fn.isDeclaration())
+      declOp = fn;
+  });
+  if (!declOp) {
+    // Already materialized (e.g. a prior loop with the same kernel name),
+    // or not present in this module -- nothing to do.
+    return;
+  }
+
+  KernelIRBuilder kernelBuilder(ctx);
+  mlir::func::FuncOp translatedFn = kernelBuilder.generate(
+      kernelSourceFile_, kernelName, indexRank, kernelConstants_, llvm::errs());
+  if (!translatedFn) {
+    llvm::errs() << "materializeGpuKernel: could not translate '"
+                 << kernelName << "' from " << kernelSourceFile_ << "\n";
+    return;
+  }
+
+  declOp.erase();
+  loweredModule_->push_back(translatedFn);
+}
+
+static std::size_t datByteSize(const DatDesc &dat) {
+  std::size_t total = static_cast<std::size_t>(dat.elem_size);
+  for (int64_t dim : dat.size)
+    total *= static_cast<std::size_t>(dim);
+  return total;
+}
+
+std::uintptr_t JITEngine::ensureDeviceBuffer(std::uintptr_t hostPtr,
+                                             std::size_t bytes) {
+#ifdef OPS_ENABLE_CUDA
+  auto it = deviceBuffers_.find(hostPtr);
+  if (it != deviceBuffers_.end())
+    return it->second;
+
+  // Use the same (primary) CUDA context mlir_cuda_runtime's wrappers use
+  // (see CudaRuntimeWrappers.cpp's ScopedContext), so buffers allocated
+  // here are valid in the kernels that runtime launches.
+  static bool contextReady = [] {
+    cuInit(0);
+    CUdevice device;
+    cuDeviceGet(&device, 0);
+    CUcontext ctx;
+    cuDevicePrimaryCtxRetain(&ctx, device);
+    cuCtxSetCurrent(ctx);
+    return true;
+  }();
+  (void)contextReady;
+
+  CUdeviceptr devPtr = 0;
+  if (CUresult rc = cuMemAlloc(&devPtr, bytes); rc != CUDA_SUCCESS) {
+    llvm::errs() << "ensureDeviceBuffer: cuMemAlloc failed (CUresult " << rc
+                 << ")\n";
+    return 0;
+  }
+  deviceBuffers_[hostPtr] = devPtr;
+  cuMemcpyHtoD(devPtr, reinterpret_cast<const void *>(hostPtr), bytes);
+  return devPtr;
+#else
+  (void)hostPtr;
+  (void)bytes;
+  return 0;
+#endif
+}
+
+void JITEngine::synchronizeBackend(Backend backend) {
+  switch (backend) {
+  case Backend::Sequential:
+  case Backend::OpenMP:
+    return;
+  case Backend::CUDA:
+#ifdef OPS_ENABLE_CUDA
+    cuCtxSynchronize();
+#endif
+    return;
+  }
 }
 
 void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
@@ -354,14 +472,37 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
   // "ops_par_loop_<kernel_name>_<queue_index>" taking one bare pointer per
   // ops_dat argument, in the order the loops were enqueued. We invoke them
   // one by one with the live data pointers.
+  //
+  // For the CUDA backend, the compiled kernel operates on device memory,
+  // not the host `ops_dat` buffer: each dat arg is mirrored into a device
+  // buffer (allocated/cached by ensureDeviceBuffer), copied host->device
+  // before the launch, and copied back device->host afterwards for any
+  // dat the kernel writes, so host code and later CPU-side loops always
+  // see up-to-date contents.
   for (std::size_t i = 0; i < queue_.size(); ++i) {
     const LoopDesc &loop = queue_[i];
     std::string funcName =
         "ops_par_loop_" + loop.kernel_name + "_" + std::to_string(i);
 
     std::vector<void *> datPtrs;
+    std::vector<std::pair<std::uintptr_t, std::size_t>> writebacks;
     for (const ArgDesc &arg : loop.args) {
-      if (arg.argtype == OPS_ARG_DAT) {
+      if (arg.argtype != OPS_ARG_DAT)
+        continue;
+
+      if (backend_ == Backend::CUDA) {
+        std::size_t bytes = datByteSize(arg.dat);
+        std::uintptr_t devPtr = ensureDeviceBuffer(arg.data, bytes);
+        if (!devPtr) {
+          llvm::errs() << "Failed to allocate device buffer for '"
+                       << funcName << "'\n";
+          this->flush();
+          return;
+        }
+        datPtrs.push_back(reinterpret_cast<void *>(devPtr));
+        if (arg.acc == OPS_WRITE || arg.acc == OPS_RW || arg.acc == OPS_INC)
+          writebacks.emplace_back(arg.data, bytes);
+      } else {
         datPtrs.push_back(reinterpret_cast<void *>(arg.data));
       }
     }
@@ -372,6 +513,9 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
       packedArgs.push_back(&ptr);
     }
 
+    {
+      KernelProfiler::ScopedTimer timer(KernelProfiler::instance(), loop.kernel_name);
+
 #ifdef OPS_ENABLE_DEBUG
     llvm::outs() << "About to invoke '" << funcName << "'\n";
     llvm::outs().flush();
@@ -379,9 +523,17 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
     if (auto err = engine->invokePacked(funcName, packedArgs)) {
       llvm::errs() << "Failed to invoke '" << funcName
                    << "': " << llvm::toString(std::move(err)) << "\n";
+      this->flush();
       return;
     }
+    synchronizeBackend(backend_);
   }
+#ifdef OPS_ENABLE_CUDA
+    for (const auto &[hostPtr, bytes] : writebacks) {
+      std::uintptr_t devPtr = ensureDeviceBuffer(hostPtr, bytes);
+      cuMemcpyDtoH(reinterpret_cast<void *>(hostPtr), devPtr, bytes);
+    }
+#endif
 
   // Clear the queue
   this->flush();
@@ -394,6 +546,23 @@ void JITEngine::compile_and_execute() {
   auto transformer = mlir::makeOptimizingTransformer(
     /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
   engineOptions.transformer = transformer;
+
+  // gpu.launch_func lowers to calls into MLIR's CUDA driver-API wrappers
+  // (mgpuLaunchKernel, mgpuStreamCreate, ...); the JIT needs
+  // libmlir_cuda_runtime.so loaded to resolve them. Path is
+  // environment/build-specific (this LLVM tree's MLIR_ENABLE_CUDA_RUNNER
+  // build), so it's read from an env var rather than hardcoded.
+  std::string cudaRuntimePath;
+  if (backend_ == Backend::CUDA) {
+    if (const char *path = std::getenv("OPS_MLIR_CUDA_RUNTIME")) {
+      cudaRuntimePath = path;
+      engineOptions.sharedLibPaths = {cudaRuntimePath};
+    } else {
+      llvm::errs() << "Warning: OPS_MLIR_CUDA_RUNTIME not set; GPU kernel "
+                     "launches will fail to resolve mgpu* symbols. Set it "
+                     "to the path of libmlir_cuda_runtime.so.\n";
+    }
+  }
 
   auto engineOrErr = mlir::ExecutionEngine::create(module, engineOptions);
   if (!engineOrErr) {

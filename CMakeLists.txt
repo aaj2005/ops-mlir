@@ -42,6 +42,9 @@ find_package(MLIR REQUIRED CONFIG
 find_package(LLVM REQUIRED CONFIG
   HINTS "${LLVM_BUILD_DIR}/lib/cmake/llvm"
 )
+find_package(Clang REQUIRED CONFIG
+  HINTS "${LLVM_BUILD_DIR}/lib/cmake/clang"
+)
 
 # Include MLIR cmake utilities
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
@@ -93,6 +96,9 @@ include_directories(${LLVM_SOURCE_DIR}/include)
 
 add_subdirectory(lib)
 add_subdirectory(apps)
+
+enable_testing()
+add_subdirectory(unittests)
 
 #===============================================================================
 # Compilation Database for Language Server

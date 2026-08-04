@@ -2,6 +2,7 @@
 #define OPS_BACKEND
 #include <string>
 #include <vector>
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 
@@ -109,6 +110,10 @@ public:
 
     pm.addPass(mlir::createGpuKernelOutliningPass());
 
+    // Inline the kernel function into the gpu.func region, 
+    // so that NVVM math redirection can be applied to it. 
+    pm.addNestedPass<mlir::gpu::GPUModuleOp>(mlir::createInlinerPass());
+
     pm.addPass(mlir::createCanonicalizerPass());
     pm.addPass(mlir::createCSEPass());
     pm.addPass(mlir::memref::createFoldMemRefAliasOpsPass());
@@ -122,6 +127,14 @@ public:
     pm.addPass(mlir::createCanonicalizerPass());
     pm.addPass(mlir::createCSEPass());
 
+    pm.addNestedPass<mlir::gpu::GPUModuleOp>(mlir::createConvertGpuOpsToNVVMOps());
+    mlir::GpuNVVMAttachTargetOptions gputargetOptions;
+    gputargetOptions.chip = nvgpuSm_;
+    pm.addPass(mlir::createGpuNVVMAttachTarget(gputargetOptions));
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
+
+    // Arith, Math to llvm conversion should be done after GPU to NVVM conversion.
     pm.addPass(mlir::createArithToLLVMConversionPass());
     pm.addPass(mlir::createConvertMathToLLVMPass());
     pm.addPass(mlir::createSCFToControlFlowPass());
@@ -132,15 +145,6 @@ public:
     mlir::ConvertFuncToLLVMPassOptions funcToLLVMOpts;
     funcToLLVMOpts.useBarePtrCallConv = true;
     pm.addPass(mlir::createConvertFuncToLLVMPass(funcToLLVMOpts));
-
-    // check these
-
-    {
-      mlir::OpPassManager &gpuModulePm = pm.nest<mlir::gpu::GPUModuleOp>();
-      gpuModulePm.addPass(mlir::createConvertGpuOpsToNVVMOps());
-      gpuModulePm.addPass(mlir::createCanonicalizerPass());
-      gpuModulePm.addPass(mlir::createCSEPass());
-    }
 
     pm.addPass(mlir::createGpuToLLVMConversionPass());
     pm.addPass(mlir::createGpuModuleToBinaryPass());
