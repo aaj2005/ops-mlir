@@ -1,6 +1,7 @@
 #include "runtime/JITEngine.h"
 #include "runtime/BackendPipeline.h"
 #include "runtime/KernelIRBuilder.h"
+#include "runtime/KernelProfiler.h"
 #include "mlir/InitAllExtensions.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Parser/Parser.h"
@@ -77,10 +78,12 @@ JITEngine::JITEngine() {
   llvm::InitializeNativeTargetAsmPrinter();
 
   // Resolve backend (without working CLI flags for now)
-  resolveBackend(0, nullptr);
+  backend_ = resolveBackend(0, nullptr);
 }
 
 JITEngine::~JITEngine() {
+  KernelProfiler::instance().report();
+
   if (Py_IsInitialized()) {
     Py_FinalizeEx();
   }
@@ -448,6 +451,19 @@ std::uintptr_t JITEngine::ensureDeviceBuffer(std::uintptr_t hostPtr,
 #endif
 }
 
+void JITEngine::synchronizeBackend(Backend backend) {
+  switch (backend) {
+  case Backend::Sequential:
+  case Backend::OpenMP:
+    return;
+  case Backend::CUDA:
+#ifdef OPS_ENABLE_CUDA
+    cuCtxSynchronize();
+#endif
+    return;
+  }
+}
+
 void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
   // Each ops.par_loop was lowered to a standalone function named
   // "ops_par_loop_<kernel_name>_<queue_index>" taking one bare pointer per
@@ -494,13 +510,18 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
       packedArgs.push_back(&ptr);
     }
 
-    if (auto err = engine->invokePacked(funcName, packedArgs)) {
-      llvm::errs() << "Failed to invoke '" << funcName
-                   << "': " << llvm::toString(std::move(err)) << "\n";
-      this->flush();
-      return;
-    }
+    {
+      KernelProfiler::ScopedTimer timer(KernelProfiler::instance(), loop.kernel_name);
 
+      if (auto err = engine->invokePacked(funcName, packedArgs)) {
+        llvm::errs() << "Failed to invoke '" << funcName
+        << "': " << llvm::toString(std::move(err)) << "\n";
+        this->flush();
+        return;
+      }
+      synchronizeBackend(backend_);  // block until the kernel is finished (for GPU timing)
+    }
+        
 #ifdef OPS_ENABLE_CUDA
     for (const auto &[hostPtr, bytes] : writebacks) {
       std::uintptr_t devPtr = ensureDeviceBuffer(hostPtr, bytes);

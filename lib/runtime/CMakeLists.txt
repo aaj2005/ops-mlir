@@ -7,6 +7,7 @@ add_library(
 	IRBuilder.cpp
 	JITEngine.cpp
 	KernelIRBuilder.cpp
+	KernelProfiler.cpp
 )
 
 target_include_directories(

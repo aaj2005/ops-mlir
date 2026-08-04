@@ -114,6 +114,8 @@ private:
   // which TU compiles it, an ODR violation.
   std::uintptr_t ensureDeviceBuffer(std::uintptr_t hostPtr, std::size_t bytes);
 
+  void synchronizeBackend(Backend backend);
+
 private:
   Backend backend_ = kDefaultBackend;
   std::mutex mutex_;
