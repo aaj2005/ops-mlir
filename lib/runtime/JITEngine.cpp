@@ -1,7 +1,7 @@
 #include "runtime/JITEngine.h"
 #include "runtime/BackendPipeline.h"
 #include "runtime/KernelIRBuilder.h"
-#include "runtime/KernelProfiler.h"
+// #include "runtime/KernelProfiler.h"
 #include "mlir/InitAllExtensions.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Parser/Parser.h"
@@ -82,7 +82,7 @@ JITEngine::JITEngine() {
 }
 
 JITEngine::~JITEngine() {
-  KernelProfiler::instance().report();
+  // KernelProfiler::instance().report();
 
   if (Py_IsInitialized()) {
     Py_FinalizeEx();
@@ -320,6 +320,7 @@ void JITEngine::runBackendLowering(mlir::ModuleOp module, Backend backend) {
   llvm::outs() << "=== BACKEND-LOWERED MLIR IR ===\n\n";
   module.print(llvm::outs());
   llvm::outs() << "\n";
+  llvm::outs().flush();
 #endif
 }
 
@@ -330,6 +331,7 @@ void JITEngine::compile() {
 
 #ifdef OPS_ENABLE_DEBUG
   llvm::outs() << "=== OPS.PAR_LOOP MLIR IR ===\n\n" << ir << "\n";
+  llvm::outs().flush();
 #endif
 
   XdslResult lowered = runXdslLowering(ir);
@@ -341,6 +343,7 @@ void JITEngine::compile() {
 #ifdef OPS_ENABLE_DEBUG
   llvm::outs() << "=== LOWERED STENCIL IR (xDSL, in-process) ===\n\n"
             << lowered.ir << "\n";
+  llvm::outs().flush();
 #endif
 
   loweredModule_ =
@@ -418,8 +421,17 @@ std::uintptr_t JITEngine::ensureDeviceBuffer(std::uintptr_t hostPtr,
                                              std::size_t bytes) {
 #ifdef OPS_ENABLE_CUDA
   auto it = deviceBuffers_.find(hostPtr);
-  if (it != deviceBuffers_.end())
-    return it->second;
+  if (it != deviceBuffers_.end()) {
+    // A host-side mutation we don't observe as an ops_par_loop (e.g. an
+    // intervening ops_halo_transfer) may have changed the host buffer
+    // since this device copy was made -- see invalidateDeviceBuffers().
+    if (it->second.dirty) {
+      cuMemcpyHtoD(static_cast<CUdeviceptr>(it->second.devPtr),
+                  reinterpret_cast<const void *>(hostPtr), bytes);
+      it->second.dirty = false;
+    }
+    return it->second.devPtr;
+  }
 
   // Use the same (primary) CUDA context mlir_cuda_runtime's wrappers use
   // (see CudaRuntimeWrappers.cpp's ScopedContext), so buffers allocated
@@ -441,7 +453,7 @@ std::uintptr_t JITEngine::ensureDeviceBuffer(std::uintptr_t hostPtr,
                  << ")\n";
     return 0;
   }
-  deviceBuffers_[hostPtr] = devPtr;
+  deviceBuffers_[hostPtr] = {static_cast<std::uintptr_t>(devPtr), false};
   cuMemcpyHtoD(devPtr, reinterpret_cast<const void *>(hostPtr), bytes);
   return devPtr;
 #else
@@ -449,6 +461,17 @@ std::uintptr_t JITEngine::ensureDeviceBuffer(std::uintptr_t hostPtr,
   (void)bytes;
   return 0;
 #endif
+}
+
+// TODO: Use dat.data_d instead of deviceBuffers_ or improve the logic re copy only affected dats.
+void JITEngine::invalidateDeviceBuffers() {
+  for (auto &[hostPtr, entry] : deviceBuffers_)
+    entry.dirty = true;
+}
+
+void haloTransferIntercepted(ops_halo_group group) {
+  ::ops_halo_transfer(group);
+  JITEngine::instance().invalidateDeviceBuffers();
 }
 
 void JITEngine::synchronizeBackend(Backend backend) {
@@ -511,17 +534,20 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
     }
 
     {
-      KernelProfiler::ScopedTimer timer(KernelProfiler::instance(), loop.kernel_name);
 
+#ifdef OPS_ENABLE_DEBUG
+    llvm::outs() << "About to invoke '" << funcName << "'\n";
+    llvm::outs().flush();
+#endif
+      // KernelProfiler::ScopedTimer timer(KernelProfiler::instance(), loop.kernel_name);
       if (auto err = engine->invokePacked(funcName, packedArgs)) {
         llvm::errs() << "Failed to invoke '" << funcName
-        << "': " << llvm::toString(std::move(err)) << "\n";
+                    << "': " << llvm::toString(std::move(err)) << "\n";
         this->flush();
         return;
       }
-      synchronizeBackend(backend_);  // block until the kernel is finished (for GPU timing)
+      // synchronizeBackend(backend_);
     }
-        
 #ifdef OPS_ENABLE_CUDA
     for (const auto &[hostPtr, bytes] : writebacks) {
       std::uintptr_t devPtr = ensureDeviceBuffer(hostPtr, bytes);
@@ -529,7 +555,6 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
     }
 #endif
   }
-
   // Clear the queue
   this->flush();
 }

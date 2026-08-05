@@ -52,11 +52,20 @@ def declare_kernel(
     ):
         return
 
-    # Idx arguments are passed as MemRefType(i32, [ndim]) to match the OPS kernel ABI 
+    # Fix ret hidden pointer issue when returning multiple results
+    # Idx arguments are passed as MemRefType(i32, [ndim]) to match the OPS kernel ABI
     param_types = (f64,) * num_f64_args + (MemRefType(i32, [ndim]),) * num_idx_args
+
+    if num_results > 1:
+        # Out-pointer ABI: kernel writes results into a trailing MemRefType(f64, [num_results]) param
+        param_types = param_types + (MemRefType(f64, [num_results]),)
+        result_types = ()
+    else:
+        result_types = (f64,) * max(num_results, 1)
+
     decl = func.FuncOp(
         name,
-        (param_types, (f64,) * max(num_results, 1)),
+        (param_types, result_types),
         region=Region(),
         visibility="private",
     )
@@ -109,16 +118,23 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
             access = block_builder.insert(stencil.AccessOp(block_arg, point))
             access_results.append(access.res)
 
+    # alloca_scope lowers to explicit stacksave/stackrestore bracketing its region
+    # (MemRefToLLVM.cpp's AllocaScopeOpLowering), so every iteration's
+    # allocas are released before the next one runs.
+    num_results = len(writes) or 1
+    scope_block = Block()
+    scope_builder = Builder(InsertPoint.at_end(scope_block))
+
     # Compute per-dim index buffers for the kernel call, which are passed as MemRefType(i32, [ndim])
     idx_buffers = []
     # Offset d_m[dim] un-normalizes the loop index back to the OPS global index:
     # ops_global_idx = normalized_loop_idx + d_m  (d_m is negative, e.g. -1)
     for _ in range(num_idx_args):
-        idx_buffer = block_builder.insert(
+        idx_buffer = scope_builder.insert(
             memref.AllocaOp.get(i32, shape=[ndim])
         )
         for d in range(ndim):
-            idx_op = block_builder.insert(
+            idx_op = scope_builder.insert(
                 stencil.IndexOp.build(
                     attributes={
                         "dim": IntegerAttr(d, IndexType()),
@@ -129,27 +145,49 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
                     result_types=[IndexType()],
                 )
             )
-            idx_i32 = block_builder.insert(
+            idx_i32 = scope_builder.insert(
                 arith.IndexCastOp(idx_op.idx, i32)
             )
-            dim_const = block_builder.insert(
+            dim_const = scope_builder.insert(
                 arith.ConstantOp(IntegerAttr(d, IndexType()))
             )
-            block_builder.insert(
+            scope_builder.insert(
                 memref.StoreOp.get(idx_i32.result, idx_buffer.memref, [dim_const.result])
             )
         idx_buffers.append(idx_buffer.memref)
 
     call_args = access_results + idx_buffers
-    num_results = len(writes) or 1
     declare_kernel(
         module, kernel_name, len(access_results), len(idx_buffers), ndim, num_results
     )
 
-    kernel = block_builder.insert(
-        func.CallOp(kernel_name, call_args, [f64] * num_results)
+    if num_results > 1:
+        out_buf = scope_builder.insert(
+            memref.AllocaOp.get(f64, shape=[num_results])
+        )
+        scope_builder.insert(
+            func.CallOp(kernel_name, call_args + [out_buf.memref], [])
+        )
+        scope_results = []
+        for i in range(num_results):
+            idx_const = scope_builder.insert(arith.ConstantOp(IntegerAttr(i, IndexType())))
+            loaded = scope_builder.insert(memref.LoadOp.get(out_buf.memref, [idx_const.result]))
+            scope_results.append(loaded.res)
+    else:
+        kernel = scope_builder.insert(
+            func.CallOp(kernel_name, call_args, [f64] * num_results)
+        )
+        scope_results = list(kernel.results)
+
+    scope_builder.insert(memref.AllocaScopeReturnOp.build(operands=[scope_results]))
+
+    alloca_scope = block_builder.insert(
+        memref.AllocaScopeOp.build(
+            regions=[Region([scope_block])],
+            result_types=[[f64] * num_results],
+        )
     )
-    block_builder.insert(stencil.ReturnOp.get(list(kernel.results)))
+    block_builder.insert(stencil.ReturnOp.get(list(alloca_scope.res)))
 
     # Create ApplyOp in buffer semantic form
     fn_builder.insert(

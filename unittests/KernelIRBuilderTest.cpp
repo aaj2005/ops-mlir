@@ -186,7 +186,8 @@ int main() {
       "}\n",
       "bad_call", /*indexRank=*/1, {}, "call to unsupported function");
 
-  // Negative: control flow / multi-statement bodies are out of scope.
+  // Negative: control flow / multi-statement bodies are out of scope for
+  // the single-`return`, double-returning shape.
   expectFailureContaining(
       ctx, "control flow unsupported",
       "double branchy(double x) {\n"
@@ -195,6 +196,66 @@ int main() {
       "}\n",
       "branchy", /*indexRank=*/1, {},
       "must be a single `return <expr>;` statement");
+
+  // Multi-write, void, out-pointer kernel (opensbliblock00Kernel039-shaped):
+  // locals threaded across statements, then two `out->field = ...` stores.
+  expectSuccessContaining(
+      ctx, "out-pointer: locals + multiple field stores",
+      "struct Result { double a; double b; };\n"
+      "void two_out(double x, Result *out) {\n"
+      "  double y = x * 2.0;\n"
+      "  out->a = y + 1.0;\n"
+      "  out->b = y - 1.0;\n"
+      "}\n",
+      "two_out", /*indexRank=*/2, {},
+      {"memref<2xf64>", "arith.mulf", "arith.addf", "arith.subf",
+       "memref.store", "memref.store"});
+
+  // Out-pointer kernel with idx + extern global, mirroring
+  // opensbliblock00Kernel039's actual shape (idx-derived locals feeding
+  // multiple field stores, plus a registered extern constant).
+  {
+    static double kScale = 2.0;
+    std::map<std::string, const void *> constants = {{"scale", &kScale}};
+    expectSuccessContaining(
+        ctx, "out-pointer: idx + extern global + locals",
+        "extern double scale;\n"
+        "struct Result { double p; double q; };\n"
+        "void init(const int *idx, Result *out) {\n"
+        "  double x0 = scale * idx[0];\n"
+        "  out->p = x0;\n"
+        "  out->q = x0 * x0;\n"
+        "}\n",
+        "init", /*indexRank=*/3, constants,
+        {"memref<3xi32>", "memref<2xf64>", "memref.load", "arith.mulf",
+         "memref.store"});
+  }
+
+  // Negative: a kernel can only have one out-pointer parameter -- with two,
+  // there's no way to tell which one a bare `->field` store targets, so
+  // this is rejected up front rather than guessing.
+  expectFailureContaining(
+      ctx, "out-pointer: more than one out-pointer parameter rejected",
+      "struct Result { double a; };\n"
+      "void bad_base(double x, Result *out, Result *other) {\n"
+      "  other->a = x;\n"
+      "}\n",
+      "bad_base", /*indexRank=*/1, {},
+      "has more than one out-pointer parameter");
+
+  // Negative: a field name that doesn't exist on the out-struct. Clang's own
+  // semantic check catches this while building the AST (before KernelIRBuilder
+  // ever sees a proper MemberExpr for it), so translation still correctly
+  // fails, just via the generic "must be `out->field`" diagnostic rather
+  // than StmtEmitter's more specific unknown-field one.
+  expectFailureContaining(
+      ctx, "out-pointer: unknown field rejected",
+      "struct Result { double a; };\n"
+      "void bad_field(double x, Result *out) {\n"
+      "  out->b = x;\n"
+      "}\n",
+      "bad_field", /*indexRank=*/1, {},
+      "assignment target must be `out->field`");
 
   if (failures == 0) {
     std::cout << "All KernelIRBuilder tests passed.\n";

@@ -19,7 +19,7 @@ namespace ops_mlir {
 enum class Backend { Sequential, OpenMP, CUDA };
 
 std::optional<Backend> parseBackendName(const std::string &name);
-constexpr Backend kDefaultBackend = Backend::CUDA;
+constexpr Backend kDefaultBackend = Backend::OpenMP;
 
 static constexpr const char *kBackendFlagPrefix = "--backend=";
 static constexpr const char *kBackendEnvVar = "OPS_BACKEND";
@@ -116,6 +116,19 @@ private:
 
   void synchronizeBackend(Backend backend);
 
+public:
+  // Marks every cached CUDA device buffer stale, forcing a host->device
+  // re-copy the next time each is touched by ensureDeviceBuffer. Needed
+  // because host-side mutations that bypass ops_par_loop -- most notably
+  // ops_halo_transfer's periodic BC exchange, which writes an ops_dat's
+  // host buffer directly -- are otherwise invisible to the device-buffer
+  // cache: without this, a dat's device mirror would silently keep
+  // reflecting pre-halo-transfer data (and a later kernel write on that
+  // dat would then copy that stale device data back over the host buffer,
+  // clobbering the halo-transferred boundary values). See
+  // OPSWrapper.h's ops_halo_transfer interception, which calls this.
+  void invalidateDeviceBuffers();
+
 private:
   Backend backend_ = kDefaultBackend;
   std::mutex mutex_;
@@ -123,11 +136,24 @@ private:
   FlushCallback flushCallback_;
   std::string kernelSourceFile_;
   std::map<std::string, const void *> kernelConstants_;
-  // Host ops_dat pointer -> device pointer (stored as uintptr_t to keep
-  // this header CUDA-toolkit-header-free; only populated/used when built
-  // with OPS_ENABLE_CUDA).
-  std::map<std::uintptr_t, std::uintptr_t> deviceBuffers_;
+
+  // Host ops_dat pointer -> cached device buffer (stored as uintptr_t to
+  // keep this header CUDA-toolkit-header-free; only populated/used when
+  // built with OPS_ENABLE_CUDA). `dirty` means the device copy no longer
+  // reflects the host buffer and must be re-copied before next use --
+  // see invalidateDeviceBuffers().
+  struct DeviceBufferEntry {
+    std::uintptr_t devPtr;
+    bool dirty = false;
+  };
+  std::map<std::uintptr_t, DeviceBufferEntry> deviceBuffers_;
 };
+
+// Forwards to the real ops_halo_transfer (linked in from the OPS host
+// library) and then invalidates JITEngine's CUDA device-buffer cache --
+// see JITEngine::invalidateDeviceBuffers's comment for why. OPSWrapper.h
+// #defines ops_halo_transfer to route call sites through this.
+void haloTransferIntercepted(ops_halo_group group);
 
 const char *accessToString(int access);
 const char *argKindToString(ArgKind kind);

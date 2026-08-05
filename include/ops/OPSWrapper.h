@@ -53,4 +53,8 @@ void set_kernel_source_file(const std::string &filePath) {
   ops_mlir::JITEngine::instance().setKernelSourceFile(filePath);
 }
 
+// TODO: Use dat.data_d instead of deviceBuffers_. or improve the logic re copy only affected dats.
+// Invalidate cached device buffers, forcing a host->device re-copy on next use.
+#define ops_halo_transfer(group) ops_mlir::haloTransferIntercepted(group)
+
 #endif // OPS_WRAPPER_H
