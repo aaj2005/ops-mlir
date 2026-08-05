@@ -15,6 +15,13 @@ FILE *f0 = fopen("block0_output.log", "a");
 
 
 int main(int argc, char **argv) {
+  // Register kernel source file with JITEngine
+  {
+    std::string thisFile = __FILE__;
+    std::string dir = thisFile.substr(0, thisFile.find_last_of('/'));
+    set_kernel_source_file(dir + "/opensbliblock00_kernels.h");
+  }
+  
   // Initializing OPS
   ops_init(argc, argv, 2);
   // Set restart to 1 to restart the simulation from HDF5 file
@@ -26,7 +33,7 @@ int main(int argc, char **argv) {
   Delta0block0 = 2 * M_PI / block0np0;
   Delta1block0 = 2 * M_PI / block0np1;
   Delta2block0 = 2 * M_PI / block0np2;
-  niter = 10;
+  niter = 3;
   double rkB[] = {(1.0 / 3.0), (15.0 / 16.0), (8.0 / 15.0)};
   double rkA[] = {0, (-5.0 / 9.0), (-153.0 / 128.0)};
   dt = 0.003385;
@@ -76,6 +83,37 @@ int main(int argc, char **argv) {
   ops_decl_const("simulation_time", 1, "double", &simulation_time);
   ops_decl_const("start_iter", 1, "int", &start_iter);
   ops_decl_const("write_output_file", 1, "int", &write_output_file);
+
+  // Add const values to the kernel constant registry for translation into MLIR for the GPU backend
+  ops_register_kernel_constant("DRP_filt", &DRP_filt);
+  ops_register_kernel_constant("Delta0block0", &Delta0block0);
+  ops_register_kernel_constant("Delta1block0", &Delta1block0);
+  ops_register_kernel_constant("Delta2block0", &Delta2block0);
+  ops_register_kernel_constant("HDF5_timing", &HDF5_timing);
+  ops_register_kernel_constant("Minf", &Minf);
+  ops_register_kernel_constant("Pr", &Pr);
+  ops_register_kernel_constant("Re", &Re);
+  ops_register_kernel_constant("block0np0", &block0np0);
+  ops_register_kernel_constant("block0np1", &block0np1);
+  ops_register_kernel_constant("block0np2", &block0np2);
+  ops_register_kernel_constant("dt", &dt);
+  ops_register_kernel_constant("filter_frequency", &filter_frequency);
+  ops_register_kernel_constant("gama", &gama);
+  ops_register_kernel_constant("inv2Delta0block0", &inv2Delta0block0);
+  ops_register_kernel_constant("inv2Delta1block0", &inv2Delta1block0);
+  ops_register_kernel_constant("inv2Delta2block0", &inv2Delta2block0);
+  ops_register_kernel_constant("inv2Minf", &inv2Minf);
+  ops_register_kernel_constant("invDelta0block0", &invDelta0block0);
+  ops_register_kernel_constant("invDelta1block0", &invDelta1block0);
+  ops_register_kernel_constant("invDelta2block0", &invDelta2block0);
+  ops_register_kernel_constant("invPr", &invPr);
+  ops_register_kernel_constant("invRe", &invRe);
+  ops_register_kernel_constant("inv_gamma_m1", &inv_gamma_m1);
+  ops_register_kernel_constant("niter", &niter);
+  ops_register_kernel_constant("simulation_time", &simulation_time);
+  ops_register_kernel_constant("start_iter", &start_iter);
+  ops_register_kernel_constant("write_output_file", &write_output_file);
+
   // Define and Declare OPS Block
   ops_block opensbliblock00 = ops_decl_block(3, "opensbliblock00");
 #include "defdec_data_set.h"
