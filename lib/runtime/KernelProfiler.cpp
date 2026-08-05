@@ -6,11 +6,6 @@
 
 namespace ops_mlir {
 
-    KernelProfiler &KernelProfiler::instance() {
-        static KernelProfiler profiler;
-        return profiler;
-    }
-
     std::vector<KernelStats> KernelProfiler::aggregate() const {
         std::unordered_map<std::string, KernelStats> byKernel;
         for (const auto &t : records_) {

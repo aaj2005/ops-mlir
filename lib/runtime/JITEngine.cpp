@@ -1,7 +1,7 @@
 #include "runtime/JITEngine.h"
 #include "runtime/BackendPipeline.h"
 #include "runtime/KernelIRBuilder.h"
-// #include "runtime/KernelProfiler.h"
+#include "runtime/KernelProfiler.h"
 #include "mlir/InitAllExtensions.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Parser/Parser.h"
@@ -82,7 +82,9 @@ JITEngine::JITEngine() {
 }
 
 JITEngine::~JITEngine() {
-  // KernelProfiler::instance().report();
+  // Safe here specifically because profiler_ is a member subobject, not a
+  // separate singleton -- see its declaration's comment (JITEngine.h).
+  profiler_.report();
 
   if (Py_IsInitialized()) {
     Py_FinalizeEx();
@@ -539,14 +541,15 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
     llvm::outs() << "About to invoke '" << funcName << "'\n";
     llvm::outs().flush();
 #endif
-      // KernelProfiler::ScopedTimer timer(KernelProfiler::instance(), loop.kernel_name);
+      auto kernelStart = profiler_.start();
       if (auto err = engine->invokePacked(funcName, packedArgs)) {
         llvm::errs() << "Failed to invoke '" << funcName
                     << "': " << llvm::toString(std::move(err)) << "\n";
         this->flush();
         return;
       }
-      // synchronizeBackend(backend_);
+      synchronizeBackend(backend_);
+      profiler_.end(loop.kernel_name, kernelStart);
     }
 #ifdef OPS_ENABLE_CUDA
     for (const auto &[hostPtr, bytes] : writebacks) {
