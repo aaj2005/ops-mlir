@@ -5,6 +5,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+// TODO: Support more than just `double` kernel parameters and locals.
+
 #include "runtime/KernelIRBuilder.h"
 
 #include "clang/AST/ASTContext.h"
@@ -96,13 +98,33 @@ static MathOpBuilder lookupMathFunction(llvm::StringRef name) {
   return it == kTable.end() ? nullptr : it->second;
 }
 
+
+// TODO: Support more than just `double` kernel parameters and locals.
+static bool isDoubleStructPointer(
+    clang::QualType type,
+    llvm::SmallVectorImpl<const clang::FieldDecl *> &outFieldOrder) {
+  if (!type->isPointerType())
+    return false;
+  const clang::RecordType *rt = type->getPointeeType()->getAs<clang::RecordType>();
+  if (!rt)
+    return false;
+  const clang::RecordDecl *rd = rt->getDecl();
+  outFieldOrder.clear();
+  for (const clang::FieldDecl *f : rd->fields()) {
+    if (!f->getType()->isSpecificBuiltinType(clang::BuiltinType::Double))
+      return false;
+    outFieldOrder.push_back(f);
+  }
+  return !outFieldOrder.empty();
+}
+
 class ExprEmitter : public clang::ConstStmtVisitor<ExprEmitter, mlir::Value> {
 public:
   ExprEmitter(mlir::OpBuilder &builder, mlir::Location loc,
-              const std::map<const clang::ParmVarDecl *, mlir::Value> &params,
+              const std::map<const clang::ValueDecl *, mlir::Value> &values,
               const std::map<std::string, const void *> &constants,
               llvm::raw_ostream &errs)
-      : builder_(builder), loc_(loc), params_(params),
+      : builder_(builder), loc_(loc), values_(values),
         constants_(constants), errs_(errs) {}
 
   bool ok() const { return ok_; }
@@ -133,12 +155,12 @@ public:
   }
 
   mlir::Value VisitDeclRefExpr(const clang::DeclRefExpr *expr) {
-    if (const auto *param =
-            llvm::dyn_cast<clang::ParmVarDecl>(expr->getDecl())) {
-      auto it = params_.find(param);
-      if (it != params_.end())
-        return it->second;
-    }
+    // Covers both kernel parameters and local `double` variables declared
+    // earlier in the body -- both get seeded into `values_` (params up
+    // front, locals as their DeclStmt is walked; see StmtEmitter).
+    auto it = values_.find(expr->getDecl());
+    if (it != values_.end())
+      return it->second;
 
     // If the kernel body references an extern global constant (e.g. `pi` or
     // `jmax`), look it up in the map of live addresses registered by the
@@ -153,8 +175,9 @@ public:
     return fail(expr, "reference to unsupported symbol '" +
                           expr->getDecl()->getNameAsString() +
                           "' (kernel bodies may only use their own "
-                          "parameters, <math.h> calls, and extern globals "
-                          "registered via JITEngine::registerKernelConstant)");
+                          "parameters, locals, <math.h> calls, and extern "
+                          "globals registered via "
+                          "JITEngine::registerKernelConstant)");
   }
 
   mlir::Value VisitFloatingLiteral(const clang::FloatingLiteral *expr) {
@@ -188,9 +211,7 @@ public:
   mlir::Value VisitArraySubscriptExpr(const clang::ArraySubscriptExpr *expr) {
     const auto *base = llvm::dyn_cast<clang::DeclRefExpr>(
         expr->getBase()->IgnoreParenImpCasts());
-    const clang::ParmVarDecl *param =
-        base ? llvm::dyn_cast<clang::ParmVarDecl>(base->getDecl()) : nullptr;
-    if (!param || !params_.count(param))
+    if (!base || !values_.count(base->getDecl()))
       return fail(expr, "array subscript base must be a kernel parameter");
 
     mlir::Value indexVal = Visit(expr->getIdx());
@@ -198,8 +219,8 @@ public:
       return {};
     mlir::Value index = builder_.create<mlir::arith::IndexCastOp>(
         loc_, builder_.getIndexType(), indexVal);
-    return builder_.create<mlir::memref::LoadOp>(loc_, params_.at(param),
-                                                 mlir::ValueRange{index});
+    return builder_.create<mlir::memref::LoadOp>(
+        loc_, values_.at(base->getDecl()), mlir::ValueRange{index});
   }
 
   mlir::Value VisitCallExpr(const clang::CallExpr *expr) {
@@ -225,6 +246,15 @@ public:
 
   mlir::Value VisitStmt(const clang::Stmt *stmt) {
     return fail(stmt, "unsupported expression construct");
+  }
+
+  mlir::Value fail(const clang::Stmt *at, const llvm::Twine &message) {
+    if (ok_) {
+      ok_ = false;
+      errs_ << "KernelIRBuilder: " << message << "\n";
+    }
+    (void)at;
+    return {};
   }
 
 private:
@@ -293,19 +323,134 @@ private:
                              "double/int globals can be baked in)");
   }
 
-  mlir::Value fail(const clang::Stmt *at, const llvm::Twine &message) {
+  mlir::OpBuilder &builder_;
+  mlir::Location loc_;
+  const std::map<const clang::ValueDecl *, mlir::Value> &values_;
+  const std::map<std::string, const void *> &constants_;
+  llvm::raw_ostream &errs_;
+  bool ok_ = true;
+};
+
+// TODO: Support more than just `double` kernel parameters and locals.
+/// Walks the body of a `void` out-pointer kernel: a sequence of
+///   double <name> = <expr>;             (locals, evaluated once and cached)
+///   <out>-><field> = <expr>;             (stores into the out-pointer's memref)
+/// in source order. Unlike ExprEmitter's single-`return <expr>;` kernels,
+/// these have multiple statements and must thread newly-declared locals
+/// forward to later statements that reference them.
+class StmtEmitter {
+public:
+  StmtEmitter(mlir::OpBuilder &builder, mlir::Location loc,
+              std::map<const clang::ValueDecl *, mlir::Value> &values,
+              const std::map<std::string, const void *> &constants,
+              const clang::ParmVarDecl *outParam, mlir::Value outMemref,
+              const llvm::SmallVectorImpl<const clang::FieldDecl *> &outFields,
+              llvm::raw_ostream &errs)
+      : builder_(builder), loc_(loc), values_(values), constants_(constants),
+        outParam_(outParam), outMemref_(outMemref), outFields_(outFields),
+        errs_(errs) {}
+
+  bool ok() const { return ok_; }
+
+  void run(const clang::CompoundStmt *body) {
+    for (const clang::Stmt *stmt : body->body()) {
+      if (!ok_)
+        return;
+      if (const auto *declStmt = llvm::dyn_cast<clang::DeclStmt>(stmt)) {
+        visitDeclStmt(declStmt);
+      } else if (const auto *ret = llvm::dyn_cast<clang::ReturnStmt>(stmt)) {
+        if (ret->getRetValue())
+          fail(ret, "a void out-pointer kernel's `return;` must not carry a value");
+      } else if (const auto *bin =
+                     llvm::dyn_cast<clang::BinaryOperator>(stmt)) {
+        visitAssign(bin);
+      } else {
+        fail(stmt, "unsupported statement in a multi-statement kernel body "
+                    "(only `double x = <expr>;` locals and `out->field = "
+                    "<expr>;` stores are supported)");
+      }
+    }
+  }
+
+private:
+  void visitDeclStmt(const clang::DeclStmt *declStmt) {
+    for (const clang::Decl *d : declStmt->decls()) {
+      if (!ok_)
+        return;
+      const auto *var = llvm::dyn_cast<clang::VarDecl>(d);
+      if (!var || !var->getType()->isSpecificBuiltinType(clang::BuiltinType::Double)) {
+        fail(declStmt, "local variable declarations must be `double`");
+        return;
+      }
+      if (!var->hasInit()) {
+        fail(declStmt, "local '" + var->getNameAsString() +
+                            "' must be initialized at declaration");
+        return;
+      }
+      ExprEmitter emitter(builder_, loc_, values_, constants_, errs_);
+      mlir::Value v = emitter.Visit(var->getInit());
+      if (!emitter.ok()) {
+        ok_ = false;
+        return;
+      }
+      values_[var] = v;
+    }
+  }
+
+  void visitAssign(const clang::BinaryOperator *bin) {
+    if (bin->getOpcode() != clang::BO_Assign) {
+      fail(bin, "only assignment statements are supported at statement level");
+      return;
+    }
+    const auto *member =
+        llvm::dyn_cast<clang::MemberExpr>(bin->getLHS()->IgnoreParenImpCasts());
+    if (!member || !member->isArrow()) {
+      fail(bin, "assignment target must be `out->field`");
+      return;
+    }
+    const auto *base = llvm::dyn_cast<clang::DeclRefExpr>(
+        member->getBase()->IgnoreParenImpCasts());
+    if (!base || base->getDecl() != outParam_) {
+      fail(bin, "assignment target's base must be the kernel's out-pointer "
+                "parameter");
+      return;
+    }
+    const auto *field = llvm::dyn_cast<clang::FieldDecl>(member->getMemberDecl());
+    auto it = field ? llvm::find(outFields_, field) : outFields_.end();
+    if (!field || it == outFields_.end()) {
+      fail(bin, "'" + member->getMemberDecl()->getNameAsString() +
+                    "' is not a field of the out-pointer's struct");
+      return;
+    }
+    std::size_t fieldIndex = std::distance(outFields_.begin(), it);
+
+    ExprEmitter emitter(builder_, loc_, values_, constants_, errs_);
+    mlir::Value rhs = emitter.Visit(bin->getRHS());
+    if (!emitter.ok()) {
+      ok_ = false;
+      return;
+    }
+
+    mlir::Value index = builder_.create<mlir::arith::ConstantOp>(
+        loc_, builder_.getIndexAttr(static_cast<int64_t>(fieldIndex)));
+    builder_.create<mlir::memref::StoreOp>(loc_, rhs, outMemref_,
+                                           mlir::ValueRange{index});
+  }
+
+  void fail(const clang::Stmt *, const llvm::Twine &message) {
     if (ok_) {
       ok_ = false;
       errs_ << "KernelIRBuilder: " << message << "\n";
     }
-    (void)at;
-    return {};
   }
 
   mlir::OpBuilder &builder_;
   mlir::Location loc_;
-  const std::map<const clang::ParmVarDecl *, mlir::Value> &params_;
+  std::map<const clang::ValueDecl *, mlir::Value> &values_;
   const std::map<std::string, const void *> &constants_;
+  const clang::ParmVarDecl *outParam_;
+  mlir::Value outMemref_;
+  const llvm::SmallVectorImpl<const clang::FieldDecl *> &outFields_;
   llvm::raw_ostream &errs_;
   bool ok_ = true;
 };
@@ -351,9 +496,18 @@ mlir::func::FuncOp KernelIRBuilder::generate(
     return nullptr;
   }
 
-  if (!decl->getReturnType()->isSpecificBuiltinType(clang::BuiltinType::Double)) {
+  // Two supported kernel shapes:
+  //  - `double kernel(...)`: a single `return <expr>;` (one write).
+  //  - `void kernel(..., Result *out)`: a sequence of `double x = <expr>;`
+  //     locals and `out->field = <expr>;` stores (more than one write) --
+  //     see opensbliblock00Kernel039's out-pointer comment for why.
+  bool isVoidReturn = decl->getReturnType()->isVoidType();
+  bool isDoubleReturn =
+      decl->getReturnType()->isSpecificBuiltinType(clang::BuiltinType::Double);
+  if (!isVoidReturn && !isDoubleReturn) {
     errs << "KernelIRBuilder: '" << kernelName
-        << "' must return double\n";
+        << "' must return double (single write) or void (multi-write, via "
+           "an out-pointer parameter)\n";
     return nullptr;
   }
 
@@ -361,8 +515,11 @@ mlir::func::FuncOp KernelIRBuilder::generate(
   mlir::Location loc = builder.getUnknownLoc();
 
   llvm::SmallVector<mlir::Type, 4> paramTypes;
+  const clang::ParmVarDecl *outParam = nullptr;
+  llvm::SmallVector<const clang::FieldDecl *, 8> outFields;
   for (const clang::ParmVarDecl *param : decl->parameters()) {
     clang::QualType type = param->getType();
+    llvm::SmallVector<const clang::FieldDecl *, 8> fields;
     if (type->isSpecificBuiltinType(clang::BuiltinType::Double)) {
       paramTypes.push_back(builder.getF64Type());
     } else if (type->isPointerType() &&
@@ -370,46 +527,85 @@ mlir::func::FuncOp KernelIRBuilder::generate(
                   clang::BuiltinType::Int)) {
       paramTypes.push_back(
           mlir::MemRefType::get({indexRank}, builder.getI32Type()));
+    } else if (isDoubleStructPointer(type, fields)) {
+      if (outParam) {
+        errs << "KernelIRBuilder: '" << kernelName
+            << "' has more than one out-pointer parameter\n";
+        return nullptr;
+      }
+      outParam = param;
+      outFields = std::move(fields);
+      paramTypes.push_back(mlir::MemRefType::get(
+          {static_cast<int64_t>(outFields.size())}, builder.getF64Type()));
     } else {
       errs << "KernelIRBuilder: unsupported parameter type for '"
-          << kernelName << "' (only double and const int* are supported)\n";
+          << kernelName << "' (only double, const int*, and a pointer to a "
+                            "struct of doubles are supported)\n";
       return nullptr;
     }
   }
 
-  auto funcType = builder.getFunctionType(paramTypes, {builder.getF64Type()});
+  if (isVoidReturn && !outParam) {
+    errs << "KernelIRBuilder: '" << kernelName
+        << "' returns void but has no out-pointer parameter to write "
+           "results through\n";
+    return nullptr;
+  }
+
+  mlir::TypeRange resultTypes =
+      isDoubleReturn ? mlir::TypeRange{builder.getF64Type()} : mlir::TypeRange{};
+  auto funcType = builder.getFunctionType(paramTypes, resultTypes);
   auto funcOp = mlir::func::FuncOp::create(loc, kernelName, funcType);
   funcOp.setPrivate();
   mlir::Block *entry = funcOp.addEntryBlock();
 
-  std::map<const clang::ParmVarDecl *, mlir::Value> paramValues;
+  std::map<const clang::ValueDecl *, mlir::Value> values;
   for (auto [param, arg] : llvm::zip(decl->parameters(), entry->getArguments()))
-    paramValues[param] = arg;
+    values[param] = arg;
 
   builder.setInsertionPointToStart(entry);
 
-  // Kernels in this codebase are a single `return <expr>;` -- anything
-  // richer (locals, control flow) is out of scope for now.
   const auto *body = llvm::dyn_cast<clang::CompoundStmt>(decl->getBody());
-  const clang::ReturnStmt *ret =
-      (body && body->size() == 1)
-          ? llvm::dyn_cast<clang::ReturnStmt>(*body->body_begin())
-          : nullptr;
-  if (!ret || !ret->getRetValue()) {
-    errs << "KernelIRBuilder: '" << kernelName
-        << "' must be a single `return <expr>;` statement\n";
+  if (!body) {
+    errs << "KernelIRBuilder: '" << kernelName << "' has no body\n";
     funcOp.erase();
     return nullptr;
   }
 
-  ExprEmitter emitter(builder, loc, paramValues, constants, errs);
-  mlir::Value result = emitter.Visit(ret->getRetValue());
-  if (!emitter.ok()) {
+  if (isDoubleReturn) {
+    // Kernels in this codebase with a single write are a single
+    // `return <expr>;` -- anything richer is out of scope for this shape
+    // (use the void out-pointer shape instead for multiple writes/locals).
+    const clang::ReturnStmt *ret =
+        (body->size() == 1) ? llvm::dyn_cast<clang::ReturnStmt>(*body->body_begin())
+                             : nullptr;
+    if (!ret || !ret->getRetValue()) {
+      errs << "KernelIRBuilder: '" << kernelName
+          << "' must be a single `return <expr>;` statement\n";
+      funcOp.erase();
+      return nullptr;
+    }
+
+    ExprEmitter emitter(builder, loc, values, constants, errs);
+    mlir::Value result = emitter.Visit(ret->getRetValue());
+    if (!emitter.ok()) {
+      funcOp.erase();
+      return nullptr;
+    }
+
+    builder.create<mlir::func::ReturnOp>(loc, result);
+    return funcOp;
+  }
+
+  StmtEmitter stmtEmitter(builder, loc, values, constants, outParam,
+                          values.at(outParam), outFields, errs);
+  stmtEmitter.run(body);
+  if (!stmtEmitter.ok()) {
     funcOp.erase();
     return nullptr;
   }
 
-  builder.create<mlir::func::ReturnOp>(loc, result);
+  builder.create<mlir::func::ReturnOp>(loc);
   return funcOp;
 }
 
