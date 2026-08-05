@@ -22,22 +22,16 @@ struct KernelStats {
 
 class KernelProfiler {
 public:
-    static KernelProfiler &instance();
+    using TimePoint = std::chrono::steady_clock::time_point;
 
-    class ScopedTimer {
-    public:
-        ScopedTimer(KernelProfiler &profiler, std::string kernelName) : profiler_(profiler), name_(std::move(kernelName)), start_(std::chrono::steady_clock::now()) {}
+    [[nodiscard]] TimePoint start() const { return std::chrono::steady_clock::now(); }
 
-        ~ScopedTimer() {
-            auto end = std::chrono::steady_clock::now();
-            double ms = std::chrono::duration<double, std::milli>(end - start_).count();
-            profiler_.record(name_, ms);
-        }
-    private:
-        KernelProfiler &profiler_;
-        std::string name_;
-        std::chrono::steady_clock::time_point start_;
-    };
+    void end(const std::string &kernelName, TimePoint startTime) {
+        double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - startTime)
+                        .count();
+        record(kernelName, ms);
+    }
 
     void record(const std::string &kernelName, double ms) {
         records_.push_back({kernelName, ms});

@@ -3,6 +3,7 @@
 
 #include "IRBuilder.h"
 #include "Core.h"
+#include "runtime/KernelProfiler.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
 
@@ -19,7 +20,7 @@ namespace ops_mlir {
 enum class Backend { Sequential, OpenMP, CUDA };
 
 std::optional<Backend> parseBackendName(const std::string &name);
-constexpr Backend kDefaultBackend = Backend::OpenMP;
+constexpr Backend kDefaultBackend = Backend::CUDA;
 
 static constexpr const char *kBackendFlagPrefix = "--backend=";
 static constexpr const char *kBackendEnvVar = "OPS_BACKEND";
@@ -67,6 +68,8 @@ public:
   Backend resolveBackend(int argc, char **argv);
 
   const std::vector<LoopDesc> &queue() const { return queue_; }
+
+  KernelProfiler &profiler() { return profiler_; }
 
 private:
   JITEngine();
@@ -136,6 +139,7 @@ private:
   FlushCallback flushCallback_;
   std::string kernelSourceFile_;
   std::map<std::string, const void *> kernelConstants_;
+  KernelProfiler profiler_;
 
   // Host ops_dat pointer -> cached device buffer (stored as uintptr_t to
   // keep this header CUDA-toolkit-header-free; only populated/used when
