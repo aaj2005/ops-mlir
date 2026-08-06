@@ -26,11 +26,15 @@ namespace ops_mlir {
 
     void KernelProfiler::report() const {
         std::cout << "=== Kernel Timing Summary ===\n";
+        float totalTime = 0.0f;
         for (const auto &s : aggregate()) {
+            totalTime += s.total_ms;
             std::cout << s.kernel_name << ": " << s.count << " calls, "
                         << s.total_ms << " ms total, "
                         << (s.total_ms / s.count) << " ms avg\n";
         }
+
+        std::cout << "Total time: " << totalTime << " ms\n";
     }
 
     void KernelProfiler::writeCsv(const std::string &path) const {
