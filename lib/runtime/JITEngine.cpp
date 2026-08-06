@@ -23,6 +23,7 @@
 #include "mlir/Target/LLVMIR/Dialect/All.h"
 #include "mlir/Target/LLVM/NVVM/Target.h"
 #include "mlir/Dialect/LLVMIR/Transforms/InlinerInterfaceImpl.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -360,36 +361,29 @@ void JITEngine::compile() {
     return;
   }
 
-  if (backend_ == Backend::CUDA) {
-    // GPU kernel bodies can't be resolved by linking a compiled host
-    // symbol (device code can't call back into host object code), so the
-    // real kernel definition has to be materialized as MLIR and spliced
-    // in before outlining, replacing the empty `func.func private
-    // @kernel(...)` declaration the xDSL lowering left behind.
-    std::vector<std::pair<std::string, int>> kernels;
-    for (const LoopDesc &loop : queue_) {
-      bool seen = std::any_of(
-          kernels.begin(), kernels.end(),
-          [&](const auto &k) { return k.first == loop.kernel_name; });
-      if (!seen)
-        kernels.emplace_back(loop.kernel_name, loop.dims);
-    }
-    for (const auto &[name, dims] : kernels) {
-      materializeGpuKernel(name, dims);
-    }
+  std::vector<std::pair<std::string, int>> kernels;
+  for (const LoopDesc &loop : queue_) {
+    bool seen = std::any_of(
+        kernels.begin(), kernels.end(),
+        [&](const auto &k) { return k.first == loop.kernel_name; });
+    if (!seen)
+      kernels.emplace_back(loop.kernel_name, loop.dims);
+  }
+  for (const auto &[name, dims] : kernels) {
+    materializeKernelBody(name, dims);
   }
 
   runBackendLowering(*loweredModule_, backend_);
   module = *loweredModule_;
 }
 
-void JITEngine::materializeGpuKernel(const std::string &kernelName,
-                                     int indexRank) {
+bool JITEngine::materializeKernelBody(const std::string &kernelName,
+                                      int indexRank) {
   if (kernelSourceFile_.empty()) {
-    llvm::errs() << "materializeGpuKernel: no kernel source file set "
+    llvm::errs() << "materializeKernelBody: no kernel source file set "
                     "(call setKernelSourceFile), cannot translate '"
-                 << kernelName << "' for the GPU backend\n";
-    return;
+                 << kernelName << "'\n";
+    return false;
   }
 
   mlir::func::FuncOp declOp;
@@ -399,21 +393,22 @@ void JITEngine::materializeGpuKernel(const std::string &kernelName,
   });
   if (!declOp) {
     // Already materialized (e.g. a prior loop with the same kernel name),
-    // or not present in this module -- nothing to do.
-    return;
+    // or not present in this module.
+    return true;
   }
 
   KernelIRBuilder kernelBuilder(ctx);
   mlir::func::FuncOp translatedFn = kernelBuilder.generate(
       kernelSourceFile_, kernelName, indexRank, kernelConstants_, llvm::errs());
   if (!translatedFn) {
-    llvm::errs() << "materializeGpuKernel: could not translate '"
+    llvm::errs() << "materializeKernelBody: could not translate '"
                  << kernelName << "' from " << kernelSourceFile_ << "\n";
-    return;
+    return false;
   }
 
   declOp.erase();
   loweredModule_->push_back(translatedFn);
+  return true;
 }
 
 static std::size_t datByteSize(const DatDesc &dat) {
@@ -618,15 +613,16 @@ void JITEngine::compile_and_execute() {
 
   auto engine = std::move(*engineOrErr);
 
-  switch (backend_) {
-  case Backend::Sequential:
-  case Backend::OpenMP:
-    registerCpuKernelSymbols(*engine);
-    break;
-  case Backend::CUDA:
-    // Kernels should be added to the Host side. CPU side symbols are not valid.
-    break;
-  }
+  // TODO: [For inlining] Kernel are generate from KernelIRBuilder for all target. 
+  // switch (backend_) {
+  // case Backend::Sequential:
+  // case Backend::OpenMP:
+  //   registerCpuKernelSymbols(*engine);
+  //   break;
+  // case Backend::CUDA:
+  //   // Kernels should be added to the Host side. CPU side symbols are not valid.
+  //   break;
+  // }
 
   mlir::ExecutionEngine &engineRef = *engine;
   engineCache_.emplace(std::move(key), std::move(engine));

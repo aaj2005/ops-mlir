@@ -22,7 +22,7 @@ namespace ops_mlir {
 enum class Backend { Sequential, OpenMP, CUDA };
 
 std::optional<Backend> parseBackendName(const std::string &name);
-constexpr Backend kDefaultBackend = Backend::OpenMP;
+constexpr Backend kDefaultBackend = Backend::CUDA;
 
 static constexpr const char *kBackendFlagPrefix = "--backend=";
 static constexpr const char *kBackendEnvVar = "OPS_BACKEND";
@@ -186,8 +186,16 @@ private:
   void execute(mlir::ExecutionEngine &engine);
   void registerCpuKernelSymbols(mlir::ExecutionEngine &engine);
 
-  // Translates a kernel body from C++ source into MLIR for the GPU backend, materializing
-  void materializeGpuKernel(const std::string &kernelName, int indexRank);
+  // Translates a kernel body from C++ source into MLIR via KernelIRBuilder,
+  // splicing it in to replace the `func.func private @kernel(...)`
+  // declaration xDSL lowering leaves behind -- required for CUDA (device
+  // code can't call back into host object code) and used for the CPU
+  // backends too so the kernel body can be inlined into the surrounding
+  // loop rather than staying an opaque call through a symbol bound by
+  // registerCpuKernelSymbols. Returns false (leaving the declaration in
+  // place) if the kernel isn't already materialized and translation fails
+  // or is unsupported, so callers can fall back to symbol binding.
+  bool materializeKernelBody(const std::string &kernelName, int indexRank);
 
   // Returns the device buffer mirroring the given host `ops_dat` buffer,
   // allocating it (via cuMemAlloc) on first use. Kernels compiled for the
