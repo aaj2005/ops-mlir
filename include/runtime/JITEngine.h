@@ -14,13 +14,15 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
+
 
 namespace ops_mlir {
 
 enum class Backend { Sequential, OpenMP, CUDA };
 
 std::optional<Backend> parseBackendName(const std::string &name);
-constexpr Backend kDefaultBackend = Backend::CUDA;
+constexpr Backend kDefaultBackend = Backend::OpenMP;
 
 static constexpr const char *kBackendFlagPrefix = "--backend=";
 static constexpr const char *kBackendEnvVar = "OPS_BACKEND";
@@ -30,6 +32,91 @@ struct XdslResult {
   std::string ir;      // populated on success
   std::string error;   // populated on failure
 };
+
+class ModuleKey {
+public:
+  explicit ModuleKey(const std::vector<LoopDesc> &queue) {
+    for (const LoopDesc &loop : queue) {
+      digest_ += loop.kernel_name;
+      digest_ += '|';
+      digest_ += std::to_string(loop.dims);
+      digest_ += '|';
+      for (int64_t r : loop.range) {
+        digest_ += std::to_string(r);
+        digest_ += ',';
+      }
+      for (const ArgDesc &arg : loop.args) {
+        digest_ += '[';
+        digest_ += std::to_string(arg.argtype);
+        digest_ += ';';
+        digest_ += std::to_string(arg.acc);
+        digest_ += ';';
+        digest_ += std::to_string(arg.dim);
+        digest_ += ';';
+        digest_ += std::to_string(arg.elem_size);
+        digest_ += ';';
+        digest_ += std::to_string(arg.opt);
+
+        const DatDesc &dat = arg.dat;
+        digest_ += ";dat:";
+        digest_ += std::to_string(dat.dim);
+        digest_ += ',';
+        digest_ += std::to_string(dat.type_size);
+        digest_ += ',';
+        digest_ += std::to_string(dat.elem_size);
+        digest_ += ',';
+        digest_ += dat.type;
+        for (int64_t v : dat.size) { digest_ += ','; digest_ += std::to_string(v); }
+        for (int64_t v : dat.base) { digest_ += ','; digest_ += std::to_string(v); }
+        for (int64_t v : dat.d_m) { digest_ += ','; digest_ += std::to_string(v); }
+        for (int64_t v : dat.d_p) { digest_ += ','; digest_ += std::to_string(v); }
+        for (int64_t v : dat.stride) { digest_ += ','; digest_ += std::to_string(v); }
+
+        const StencilDesc &st = arg.stencil;
+        digest_ += ";st:";
+        digest_ += std::to_string(st.dims);
+        digest_ += ',';
+        digest_ += std::to_string(st.points);
+        digest_ += ',';
+        digest_ += std::to_string(st.type);
+        if (st.stencil) {
+          const int *offsets = reinterpret_cast<const int *>(st.stencil);
+          for (int i = 0; i < st.dims * st.points; ++i) {
+            digest_ += ',';
+            digest_ += std::to_string(offsets[i]);
+          }
+        }
+        digest_ += ']';
+      }
+      digest_ += '\n';
+    }
+  }
+
+  [[nodiscard]] const std::string &digest() const { return digest_; }
+
+  bool operator==(const ModuleKey &other) const {
+    return digest_ == other.digest_;
+  }
+
+  [[nodiscard]] std::size_t hash() const {
+    return std::hash<std::string>{}(digest_);
+  }
+
+private:
+  std::string digest_;
+};
+
+} // namespace ops_mlir
+
+namespace std {
+template <> struct hash<ops_mlir::ModuleKey> {
+  std::size_t operator()(const ops_mlir::ModuleKey &key) const {
+    return key.hash();
+  }
+};
+} // namespace std
+
+namespace ops_mlir {
 
 class JITEngine {
 public:
@@ -96,7 +183,7 @@ private:
   std::string detectNVGpuSm();
 
   void compile();
-  void execute(std::unique_ptr<mlir::ExecutionEngine> engine);
+  void execute(mlir::ExecutionEngine &engine);
   void registerCpuKernelSymbols(mlir::ExecutionEngine &engine);
 
   // Translates a kernel body from C++ source into MLIR for the GPU backend, materializing
@@ -132,6 +219,8 @@ public:
   // OPSWrapper.h's ops_halo_transfer interception, which calls this.
   void invalidateDeviceBuffers();
 
+  void shutdown();
+
 private:
   Backend backend_ = kDefaultBackend;
   std::mutex mutex_;
@@ -139,6 +228,10 @@ private:
   FlushCallback flushCallback_;
   std::string kernelSourceFile_;
   std::map<std::string, const void *> kernelConstants_;
+
+  std::unordered_map<ModuleKey, std::unique_ptr<mlir::ExecutionEngine>>
+      engineCache_;
+
   KernelProfiler profiler_;
 
   // Host ops_dat pointer -> cached device buffer (stored as uintptr_t to
@@ -158,6 +251,8 @@ private:
 // see JITEngine::invalidateDeviceBuffers's comment for why. OPSWrapper.h
 // #defines ops_halo_transfer to route call sites through this.
 void haloTransferIntercepted(ops_halo_group group);
+
+void exitIntercepted();
 
 const char *accessToString(int access);
 const char *argKindToString(ArgKind kind);

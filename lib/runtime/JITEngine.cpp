@@ -24,6 +24,10 @@
 #include "mlir/Target/LLVM/NVVM/Target.h"
 #include "mlir/Dialect/LLVMIR/Transforms/InlinerInterfaceImpl.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/TargetParser/SubtargetFeature.h"
+#include "llvm/TargetParser/Host.h"
 
 #include <algorithm>
 #include <memory>
@@ -476,6 +480,15 @@ void haloTransferIntercepted(ops_halo_group group) {
   JITEngine::instance().invalidateDeviceBuffers();
 }
 
+void JITEngine::shutdown() {
+  engineCache_.clear();
+}
+
+void exitIntercepted() {
+  JITEngine::instance().shutdown();
+  ::ops_exit();
+}
+
 void JITEngine::synchronizeBackend(Backend backend) {
   switch (backend) {
   case Backend::Sequential:
@@ -489,7 +502,7 @@ void JITEngine::synchronizeBackend(Backend backend) {
   }
 }
 
-void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
+void JITEngine::execute(mlir::ExecutionEngine &engine) {
   // Each ops.par_loop was lowered to a standalone function named
   // "ops_par_loop_<kernel_name>_<queue_index>" taking one bare pointer per
   // ops_dat argument, in the order the loops were enqueued. We invoke them
@@ -531,26 +544,24 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
 
     llvm::SmallVector<void *> packedArgs;
     packedArgs.reserve(datPtrs.size());
+
     for (void *&ptr : datPtrs) {
       packedArgs.push_back(&ptr);
     }
-
-    {
 
 #ifdef OPS_ENABLE_DEBUG
     llvm::outs() << "About to invoke '" << funcName << "'\n";
     llvm::outs().flush();
 #endif
-      auto kernelStart = profiler_.start();
-      if (auto err = engine->invokePacked(funcName, packedArgs)) {
-        llvm::errs() << "Failed to invoke '" << funcName
-                    << "': " << llvm::toString(std::move(err)) << "\n";
-        this->flush();
-        return;
-      }
-      synchronizeBackend(backend_);
-      profiler_.end(loop.kernel_name, kernelStart);
+    auto kernelStart = profiler_.start();
+    if (auto err = engine.invokePacked(funcName, packedArgs)) {
+      llvm::errs() << "Failed to invoke '" << funcName
+                  << "': " << llvm::toString(std::move(err)) << "\n";
+      this->flush();
+      return;
     }
+    synchronizeBackend(backend_);
+    profiler_.end(loop.kernel_name, kernelStart);
 #ifdef OPS_ENABLE_CUDA
     for (const auto &[hostPtr, bytes] : writebacks) {
       std::uintptr_t devPtr = ensureDeviceBuffer(hostPtr, bytes);
@@ -563,6 +574,17 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
 }
 
 void JITEngine::compile_and_execute() {
+  if (queue_.empty())
+    return;
+
+  ModuleKey key(queue_);
+
+  auto cached = engineCache_.find(key);
+  if (cached != engineCache_.end()) {
+    execute(*cached->second);
+    return;
+  }
+
   compile();
 
   mlir::ExecutionEngineOptions engineOptions;
@@ -606,7 +628,9 @@ void JITEngine::compile_and_execute() {
     break;
   }
 
-  execute(std::move(engine));
+  mlir::ExecutionEngine &engineRef = *engine;
+  engineCache_.emplace(std::move(key), std::move(engine));
+  execute(engineRef);
 }
 
 void JITEngine::registerCpuKernelSymbols(mlir::ExecutionEngine &engine) {
