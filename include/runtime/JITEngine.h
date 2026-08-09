@@ -118,6 +118,8 @@ template <> struct hash<ops_mlir::ModuleKey> {
 
 namespace ops_mlir {
 
+class BackendPipeline;
+
 class JITEngine {
 public:
   using FlushCallback = std::function<void(const std::vector<LoopDesc> &)>;
@@ -215,19 +217,13 @@ private:
   void synchronizeBackend(Backend backend);
 
 public:
-  // Marks every cached CUDA device buffer stale, forcing a host->device
-  // re-copy the next time each is touched by ensureDeviceBuffer. Needed
-  // because host-side mutations that bypass ops_par_loop -- most notably
-  // ops_halo_transfer's periodic BC exchange, which writes an ops_dat's
-  // host buffer directly -- are otherwise invisible to the device-buffer
-  // cache: without this, a dat's device mirror would silently keep
-  // reflecting pre-halo-transfer data (and a later kernel write on that
-  // dat would then copy that stale device data back over the host buffer,
-  // clobbering the halo-transferred boundary values). See
-  // OPSWrapper.h's ops_halo_transfer interception, which calls this.
-  void invalidateDeviceBuffers();
+
+  void invalidateDeviceBuffer(std::uintptr_t hostPtr);
 
   void shutdown();
+
+  // Returns a persistent CUDA stream (CUstream) for kernels to launch on.
+  std::uintptr_t ensurePersistentCudaStream();
 
 private:
   Backend backend_ = kDefaultBackend;
@@ -239,6 +235,8 @@ private:
 
   std::unordered_map<ModuleKey, std::unique_ptr<mlir::ExecutionEngine>>
       engineCache_;
+
+  std::unique_ptr<BackendPipeline> currentPipeline_;
 
   KernelProfiler profiler_;
 

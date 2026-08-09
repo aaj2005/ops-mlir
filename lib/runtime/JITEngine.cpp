@@ -23,7 +23,7 @@
 #include "mlir/Target/LLVMIR/Dialect/All.h"
 #include "mlir/Target/LLVM/NVVM/Target.h"
 #include "mlir/Dialect/LLVMIR/Transforms/InlinerInterfaceImpl.h"
-#include "llvm/ADT/DenseSet.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -76,10 +76,8 @@ JITEngine::JITEngine() {
   mlir::LLVM::registerInlinerInterface(registry);
   ctx.appendDialectRegistry(registry);
 
-  // Needed so the JIT's target machine can be created for the host triple;
-  // without this, ExecutionEngine::create fails with "Unable to find target
-  // for this triple (no targets are registered)".
-  llvm::InitializeNativeTarget();
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
   llvm::InitializeNativeTargetAsmPrinter();
 
   // Resolve backend (without working CLI flags for now)
@@ -319,9 +317,13 @@ void JITEngine::runBackendLowering(mlir::ModuleOp module, Backend backend) {
   }
 
   if (mlir::failed(pipeline->run(module, ctx))) {
-    llvm::errs() << "backend lowering failed for module\n"; 
+    llvm::errs() << "backend lowering failed for module\n";
     return;
   }
+
+  // Kept alive for compile_and_execute() -- see currentPipeline_'s
+  // comment (JITEngine.h).
+  currentPipeline_ = std::move(pipeline);
 
 #ifdef OPS_ENABLE_DEBUG
   llvm::outs() << "=== BACKEND-LOWERED MLIR IR ===\n\n";
@@ -464,15 +466,50 @@ std::uintptr_t JITEngine::ensureDeviceBuffer(std::uintptr_t hostPtr,
 #endif
 }
 
-// TODO: Use dat.data_d instead of deviceBuffers_ or improve the logic re copy only affected dats.
-void JITEngine::invalidateDeviceBuffers() {
-  for (auto &[hostPtr, entry] : deviceBuffers_)
-    entry.dirty = true;
+std::uintptr_t JITEngine::ensurePersistentCudaStream() {
+#ifdef OPS_ENABLE_CUDA
+  static CUstream stream = [] {
+    CUstream s = nullptr;
+    if (CUresult rc = cuStreamCreate(&s, CU_STREAM_DEFAULT); rc != CUDA_SUCCESS) {
+      llvm::errs() << "ensurePersistentCudaStream: cuStreamCreate failed "
+                      "(CUresult "
+                   << rc << ")\n";
+      return static_cast<CUstream>(nullptr);
+    }
+    return s;
+  }();
+  return reinterpret_cast<std::uintptr_t>(stream);
+#else
+  return 0;
+#endif
+}
+
+// Free function so it has a stable, unmangled name to declare/call from
+// generated LLVM IR and to hand to registerSymbols -- matches how
+// KernelProfiler etc. get exposed, just at the raw-address level instead of
+// a mlir_ciface wrapper.
+extern "C" void *ops_mlir_get_persistent_cuda_stream() {
+  return reinterpret_cast<void *>(JITEngine::instance().ensurePersistentCudaStream());
+}
+
+// TODO: Use dat.data_d instead of deviceBuffers_.
+void JITEngine::invalidateDeviceBuffer(std::uintptr_t hostPtr) {
+  auto it = deviceBuffers_.find(hostPtr);
+  if (it != deviceBuffers_.end())
+    it->second.dirty = true;
 }
 
 void haloTransferIntercepted(ops_halo_group group) {
   ::ops_halo_transfer(group);
-  JITEngine::instance().invalidateDeviceBuffers();
+  // Only the dats this group actually writes (`to`) need invalidating --
+  // `from` isn't mutated by the copy, and every other cached dat is
+  // untouched by this call. See invalidateDeviceBuffer's comment for why
+  // that distinction matters.
+  for (int i = 0; i < group->nhalos; ++i) {
+    ops_dat to = group->halos[i]->to;
+    JITEngine::instance().invalidateDeviceBuffer(
+        reinterpret_cast<std::uintptr_t>(to->data));
+  }
 }
 
 void JITEngine::shutdown() {
@@ -582,9 +619,39 @@ void JITEngine::compile_and_execute() {
 
   compile();
 
+  llvm::Triple targetTriple(llvm::sys::getDefaultTargetTriple());
+  std::string targetLookupError;
+  const llvm::Target *target =
+      llvm::TargetRegistry::lookupTarget(targetTriple, targetLookupError);
+  std::unique_ptr<llvm::TargetMachine> targetMachine;
+  if (!target) {
+    llvm::errs() << "Warning: could not look up target for '"
+                 << targetTriple.str() << "': " << targetLookupError
+                 << "; falling back to no target machine (no "
+                    "auto-vectorization)\n";
+  } else {
+    llvm::SubtargetFeatures features;
+    for (auto &[feature, enabled] : llvm::sys::getHostCPUFeatures())
+      features.AddFeature(feature, enabled);
+
+    llvm::TargetOptions targetOptions;
+    targetMachine.reset(target->createTargetMachine(
+        targetTriple, llvm::sys::getHostCPUName(), features.getString(),
+        targetOptions, /*RM=*/std::nullopt, /*CM=*/std::nullopt,
+        llvm::CodeGenOptLevel::Aggressive));
+  }
+
   mlir::ExecutionEngineOptions engineOptions;
-  auto transformer = mlir::makeOptimizingTransformer(
-    /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
+  auto optTransformer = mlir::makeOptimizingTransformer(
+    /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/targetMachine.get());
+
+  std::function<llvm::Error(llvm::Module *)> transformer =
+      [this, optTransformer](llvm::Module *m) -> llvm::Error {
+    if (currentPipeline_)
+      if (auto err = currentPipeline_->transformLLVMModule(m))
+        return err;
+    return optTransformer(m);
+  };
   engineOptions.transformer = transformer;
 
   // gpu.launch_func lowers to calls into MLIR's CUDA driver-API wrappers
@@ -613,7 +680,7 @@ void JITEngine::compile_and_execute() {
 
   auto engine = std::move(*engineOrErr);
 
-  // TODO: [For inlining] Kernel are generate from KernelIRBuilder for all target. 
+  // TODO: [For inlining] Kernel are generate from KernelIRBuilder for all target.
   // switch (backend_) {
   // case Backend::Sequential:
   // case Backend::OpenMP:
@@ -623,6 +690,16 @@ void JITEngine::compile_and_execute() {
   //   // Kernels should be added to the Host side. CPU side symbols are not valid.
   //   break;
   // }
+
+  if (backend_ == Backend::CUDA) {
+    engine->registerSymbols([](llvm::orc::MangleAndInterner interner) {
+      llvm::orc::SymbolMap symbolMap;
+      symbolMap[interner("ops_mlir_get_persistent_cuda_stream")] = {
+          llvm::orc::ExecutorAddr::fromPtr(&ops_mlir_get_persistent_cuda_stream),
+          llvm::JITSymbolFlags::Exported};
+      return symbolMap;
+    });
+  }
 
   mlir::ExecutionEngine &engineRef = *engine;
   engineCache_.emplace(std::move(key), std::move(engine));
