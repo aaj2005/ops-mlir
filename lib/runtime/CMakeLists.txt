@@ -34,6 +34,13 @@ target_compile_definitions(
 	$<$<BOOL:${OPS_ENABLE_CUDA}>:OPS_ENABLE_CUDA>
 )
 
+# BackendPipeline.h (via JITEngine.cpp) defines custom mlir::Pass subclasses
+# -- this LLVM/MLIR build has LLVM_ENABLE_RTTI=OFF, so mlir::Pass has no
+# typeinfo emitted anywhere. Compiling this TU with the default (RTTI-on)
+# would try to reference that nonexistent typeinfo and fail to link (same
+# issue tools/kernel-ir-dump.cpp hit with llvm::cl::Option).
+target_compile_options(OPSRuntime PRIVATE -fno-rtti)
+
 if(OPS_ENABLE_CUDA)
   target_link_libraries(OPSRuntime PRIVATE CUDA::cuda_driver)
 endif()
@@ -51,6 +58,7 @@ target_link_libraries(
 	MLIRToLLVMIRTranslationRegistration
 	MLIRVectorToLLVM
 	MLIRRegisterAllExtensions
+	OPSPasses
 	Python3::Python
 	clangTooling
 )

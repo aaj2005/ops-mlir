@@ -33,7 +33,7 @@ int main(int argc, char **argv) {
   Delta0block0 = 2 * M_PI / block0np0;
   Delta1block0 = 2 * M_PI / block0np1;
   Delta2block0 = 2 * M_PI / block0np2;
-  niter = 3;
+  niter = 5000;
   double rkB[] = {(1.0 / 3.0), (15.0 / 16.0), (8.0 / 15.0)};
   double rkA[] = {0, (-5.0 / 9.0), (-153.0 / 128.0)};
   dt = 0.003385;

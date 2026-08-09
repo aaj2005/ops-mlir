@@ -1,8 +1,15 @@
 #ifndef OPS_BACKEND
 #define OPS_BACKEND
+#include <array>
 #include <string>
 #include <vector>
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/IRMapping.h"
+#include "llvm/Support/Error.h"
+#include "passes/UseMonoCuStream.h"
+#include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 
@@ -35,6 +42,10 @@ public:
     mlir::PassManager pm(&ctx);
     build(pm);
     return pm.run(module);
+  }
+
+  virtual llvm::Error transformLLVMModule(llvm::Module *) const {
+    return llvm::Error::success();
   }
 };
 
@@ -150,6 +161,10 @@ public:
     pm.addPass(mlir::createGpuModuleToBinaryPass());
     pm.addPass(mlir::createCanonicalizerPass());
     pm.addPass(mlir::createCSEPass());
+  }
+
+  llvm::Error transformLLVMModule(llvm::Module *m) const override {
+    return useMonoCudaStream(m);
   }
 
 private:

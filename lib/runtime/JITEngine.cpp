@@ -23,7 +23,12 @@
 #include "mlir/Target/LLVMIR/Dialect/All.h"
 #include "mlir/Target/LLVM/NVVM/Target.h"
 #include "mlir/Dialect/LLVMIR/Transforms/InlinerInterfaceImpl.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/TargetParser/SubtargetFeature.h"
+#include "llvm/TargetParser/Host.h"
 
 #include <algorithm>
 #include <memory>
@@ -71,10 +76,8 @@ JITEngine::JITEngine() {
   mlir::LLVM::registerInlinerInterface(registry);
   ctx.appendDialectRegistry(registry);
 
-  // Needed so the JIT's target machine can be created for the host triple;
-  // without this, ExecutionEngine::create fails with "Unable to find target
-  // for this triple (no targets are registered)".
-  llvm::InitializeNativeTarget();
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
   llvm::InitializeNativeTargetAsmPrinter();
 
   // Resolve backend (without working CLI flags for now)
@@ -314,9 +317,13 @@ void JITEngine::runBackendLowering(mlir::ModuleOp module, Backend backend) {
   }
 
   if (mlir::failed(pipeline->run(module, ctx))) {
-    llvm::errs() << "backend lowering failed for module\n"; 
+    llvm::errs() << "backend lowering failed for module\n";
     return;
   }
+
+  // Kept alive for compile_and_execute() -- see currentPipeline_'s
+  // comment (JITEngine.h).
+  currentPipeline_ = std::move(pipeline);
 
 #ifdef OPS_ENABLE_DEBUG
   llvm::outs() << "=== BACKEND-LOWERED MLIR IR ===\n\n";
@@ -356,36 +363,29 @@ void JITEngine::compile() {
     return;
   }
 
-  if (backend_ == Backend::CUDA) {
-    // GPU kernel bodies can't be resolved by linking a compiled host
-    // symbol (device code can't call back into host object code), so the
-    // real kernel definition has to be materialized as MLIR and spliced
-    // in before outlining, replacing the empty `func.func private
-    // @kernel(...)` declaration the xDSL lowering left behind.
-    std::vector<std::pair<std::string, int>> kernels;
-    for (const LoopDesc &loop : queue_) {
-      bool seen = std::any_of(
-          kernels.begin(), kernels.end(),
-          [&](const auto &k) { return k.first == loop.kernel_name; });
-      if (!seen)
-        kernels.emplace_back(loop.kernel_name, loop.dims);
-    }
-    for (const auto &[name, dims] : kernels) {
-      materializeGpuKernel(name, dims);
-    }
+  std::vector<std::pair<std::string, int>> kernels;
+  for (const LoopDesc &loop : queue_) {
+    bool seen = std::any_of(
+        kernels.begin(), kernels.end(),
+        [&](const auto &k) { return k.first == loop.kernel_name; });
+    if (!seen)
+      kernels.emplace_back(loop.kernel_name, loop.dims);
+  }
+  for (const auto &[name, dims] : kernels) {
+    materializeKernelBody(name, dims);
   }
 
   runBackendLowering(*loweredModule_, backend_);
   module = *loweredModule_;
 }
 
-void JITEngine::materializeGpuKernel(const std::string &kernelName,
-                                     int indexRank) {
+bool JITEngine::materializeKernelBody(const std::string &kernelName,
+                                      int indexRank) {
   if (kernelSourceFile_.empty()) {
-    llvm::errs() << "materializeGpuKernel: no kernel source file set "
+    llvm::errs() << "materializeKernelBody: no kernel source file set "
                     "(call setKernelSourceFile), cannot translate '"
-                 << kernelName << "' for the GPU backend\n";
-    return;
+                 << kernelName << "'\n";
+    return false;
   }
 
   mlir::func::FuncOp declOp;
@@ -395,21 +395,22 @@ void JITEngine::materializeGpuKernel(const std::string &kernelName,
   });
   if (!declOp) {
     // Already materialized (e.g. a prior loop with the same kernel name),
-    // or not present in this module -- nothing to do.
-    return;
+    // or not present in this module.
+    return true;
   }
 
   KernelIRBuilder kernelBuilder(ctx);
   mlir::func::FuncOp translatedFn = kernelBuilder.generate(
       kernelSourceFile_, kernelName, indexRank, kernelConstants_, llvm::errs());
   if (!translatedFn) {
-    llvm::errs() << "materializeGpuKernel: could not translate '"
+    llvm::errs() << "materializeKernelBody: could not translate '"
                  << kernelName << "' from " << kernelSourceFile_ << "\n";
-    return;
+    return false;
   }
 
   declOp.erase();
   loweredModule_->push_back(translatedFn);
+  return true;
 }
 
 static std::size_t datByteSize(const DatDesc &dat) {
@@ -465,15 +466,59 @@ std::uintptr_t JITEngine::ensureDeviceBuffer(std::uintptr_t hostPtr,
 #endif
 }
 
-// TODO: Use dat.data_d instead of deviceBuffers_ or improve the logic re copy only affected dats.
-void JITEngine::invalidateDeviceBuffers() {
-  for (auto &[hostPtr, entry] : deviceBuffers_)
-    entry.dirty = true;
+std::uintptr_t JITEngine::ensurePersistentCudaStream() {
+#ifdef OPS_ENABLE_CUDA
+  static CUstream stream = [] {
+    CUstream s = nullptr;
+    if (CUresult rc = cuStreamCreate(&s, CU_STREAM_DEFAULT); rc != CUDA_SUCCESS) {
+      llvm::errs() << "ensurePersistentCudaStream: cuStreamCreate failed "
+                      "(CUresult "
+                   << rc << ")\n";
+      return static_cast<CUstream>(nullptr);
+    }
+    return s;
+  }();
+  return reinterpret_cast<std::uintptr_t>(stream);
+#else
+  return 0;
+#endif
+}
+
+// Free function so it has a stable, unmangled name to declare/call from
+// generated LLVM IR and to hand to registerSymbols -- matches how
+// KernelProfiler etc. get exposed, just at the raw-address level instead of
+// a mlir_ciface wrapper.
+extern "C" void *ops_mlir_get_persistent_cuda_stream() {
+  return reinterpret_cast<void *>(JITEngine::instance().ensurePersistentCudaStream());
+}
+
+// TODO: Use dat.data_d instead of deviceBuffers_.
+void JITEngine::invalidateDeviceBuffer(std::uintptr_t hostPtr) {
+  auto it = deviceBuffers_.find(hostPtr);
+  if (it != deviceBuffers_.end())
+    it->second.dirty = true;
 }
 
 void haloTransferIntercepted(ops_halo_group group) {
   ::ops_halo_transfer(group);
-  JITEngine::instance().invalidateDeviceBuffers();
+  // Only the dats this group actually writes (`to`) need invalidating --
+  // `from` isn't mutated by the copy, and every other cached dat is
+  // untouched by this call. See invalidateDeviceBuffer's comment for why
+  // that distinction matters.
+  for (int i = 0; i < group->nhalos; ++i) {
+    ops_dat to = group->halos[i]->to;
+    JITEngine::instance().invalidateDeviceBuffer(
+        reinterpret_cast<std::uintptr_t>(to->data));
+  }
+}
+
+void JITEngine::shutdown() {
+  engineCache_.clear();
+}
+
+void exitIntercepted() {
+  JITEngine::instance().shutdown();
+  ::ops_exit();
 }
 
 void JITEngine::synchronizeBackend(Backend backend) {
@@ -489,7 +534,7 @@ void JITEngine::synchronizeBackend(Backend backend) {
   }
 }
 
-void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
+void JITEngine::execute(mlir::ExecutionEngine &engine) {
   // Each ops.par_loop was lowered to a standalone function named
   // "ops_par_loop_<kernel_name>_<queue_index>" taking one bare pointer per
   // ops_dat argument, in the order the loops were enqueued. We invoke them
@@ -531,26 +576,24 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
 
     llvm::SmallVector<void *> packedArgs;
     packedArgs.reserve(datPtrs.size());
+
     for (void *&ptr : datPtrs) {
       packedArgs.push_back(&ptr);
     }
-
-    {
 
 #ifdef OPS_ENABLE_DEBUG
     llvm::outs() << "About to invoke '" << funcName << "'\n";
     llvm::outs().flush();
 #endif
-      auto kernelStart = profiler_.start();
-      if (auto err = engine->invokePacked(funcName, packedArgs)) {
-        llvm::errs() << "Failed to invoke '" << funcName
-                    << "': " << llvm::toString(std::move(err)) << "\n";
-        this->flush();
-        return;
-      }
-      synchronizeBackend(backend_);
-      profiler_.end(loop.kernel_name, kernelStart);
+    auto kernelStart = profiler_.start();
+    if (auto err = engine.invokePacked(funcName, packedArgs)) {
+      llvm::errs() << "Failed to invoke '" << funcName
+                  << "': " << llvm::toString(std::move(err)) << "\n";
+      this->flush();
+      return;
     }
+    synchronizeBackend(backend_);
+    profiler_.end(loop.kernel_name, kernelStart);
 #ifdef OPS_ENABLE_CUDA
     for (const auto &[hostPtr, bytes] : writebacks) {
       std::uintptr_t devPtr = ensureDeviceBuffer(hostPtr, bytes);
@@ -563,11 +606,52 @@ void JITEngine::execute(std::unique_ptr<mlir::ExecutionEngine> engine) {
 }
 
 void JITEngine::compile_and_execute() {
+  if (queue_.empty())
+    return;
+
+  ModuleKey key(queue_);
+
+  auto cached = engineCache_.find(key);
+  if (cached != engineCache_.end()) {
+    execute(*cached->second);
+    return;
+  }
+
   compile();
 
+  llvm::Triple targetTriple(llvm::sys::getDefaultTargetTriple());
+  std::string targetLookupError;
+  const llvm::Target *target =
+      llvm::TargetRegistry::lookupTarget(targetTriple, targetLookupError);
+  std::unique_ptr<llvm::TargetMachine> targetMachine;
+  if (!target) {
+    llvm::errs() << "Warning: could not look up target for '"
+                 << targetTriple.str() << "': " << targetLookupError
+                 << "; falling back to no target machine (no "
+                    "auto-vectorization)\n";
+  } else {
+    llvm::SubtargetFeatures features;
+    for (auto &[feature, enabled] : llvm::sys::getHostCPUFeatures())
+      features.AddFeature(feature, enabled);
+
+    llvm::TargetOptions targetOptions;
+    targetMachine.reset(target->createTargetMachine(
+        targetTriple, llvm::sys::getHostCPUName(), features.getString(),
+        targetOptions, /*RM=*/std::nullopt, /*CM=*/std::nullopt,
+        llvm::CodeGenOptLevel::Aggressive));
+  }
+
   mlir::ExecutionEngineOptions engineOptions;
-  auto transformer = mlir::makeOptimizingTransformer(
-    /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
+  auto optTransformer = mlir::makeOptimizingTransformer(
+    /*optLevel=*/3, /*sizeLevel=*/0, /*targetMachine=*/targetMachine.get());
+
+  std::function<llvm::Error(llvm::Module *)> transformer =
+      [this, optTransformer](llvm::Module *m) -> llvm::Error {
+    if (currentPipeline_)
+      if (auto err = currentPipeline_->transformLLVMModule(m))
+        return err;
+    return optTransformer(m);
+  };
   engineOptions.transformer = transformer;
 
   // gpu.launch_func lowers to calls into MLIR's CUDA driver-API wrappers
@@ -596,17 +680,30 @@ void JITEngine::compile_and_execute() {
 
   auto engine = std::move(*engineOrErr);
 
-  switch (backend_) {
-  case Backend::Sequential:
-  case Backend::OpenMP:
-    registerCpuKernelSymbols(*engine);
-    break;
-  case Backend::CUDA:
-    // Kernels should be added to the Host side. CPU side symbols are not valid.
-    break;
+  // TODO: [For inlining] Kernel are generate from KernelIRBuilder for all target.
+  // switch (backend_) {
+  // case Backend::Sequential:
+  // case Backend::OpenMP:
+  //   registerCpuKernelSymbols(*engine);
+  //   break;
+  // case Backend::CUDA:
+  //   // Kernels should be added to the Host side. CPU side symbols are not valid.
+  //   break;
+  // }
+
+  if (backend_ == Backend::CUDA) {
+    engine->registerSymbols([](llvm::orc::MangleAndInterner interner) {
+      llvm::orc::SymbolMap symbolMap;
+      symbolMap[interner("ops_mlir_get_persistent_cuda_stream")] = {
+          llvm::orc::ExecutorAddr::fromPtr(&ops_mlir_get_persistent_cuda_stream),
+          llvm::JITSymbolFlags::Exported};
+      return symbolMap;
+    });
   }
 
-  execute(std::move(engine));
+  mlir::ExecutionEngine &engineRef = *engine;
+  engineCache_.emplace(std::move(key), std::move(engine));
+  execute(engineRef);
 }
 
 void JITEngine::registerCpuKernelSymbols(mlir::ExecutionEngine &engine) {
