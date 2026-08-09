@@ -1,6 +1,7 @@
 #ifndef OPS_BACKEND
 #define OPS_BACKEND
 #include <array>
+#include <memory>
 #include <string>
 #include <vector>
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -35,6 +36,16 @@
 
 namespace ops_mlir {
 
+class MakeFunctionOpPublicPass : public mlir::PassWrapper<MakeFunctionOpPublicPass, mlir::OperationPass<mlir::ModuleOp>> {
+
+public:
+	void runOnOperation() override {
+		getOperation().walk([&](mlir::func::FuncOp funcOp) {
+			if (funcOp.getSymName().starts_with("ops_par_loop"))
+				funcOp.setVisibility(mlir::SymbolTable::Visibility::Public);
+		});
+	}
+};
 
 class MapParallelToGpuLaunchPass
     : public mlir::PassWrapper<MapParallelToGpuLaunchPass,
@@ -156,6 +167,10 @@ class CPUSequentialPipeline : public BackendPipeline {
 public:
   void build(mlir::PassManager &pm) const override {
     pm.addPass(mlir::createConvertBufferizationToMemRefPass());
+		pm.addPass(std::make_unique<MakeFunctionOpPublicPass>());
+    pm.addPass(mlir::createInlinerPass());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
     pm.addPass(mlir::createSCFToControlFlowPass());
     pm.addPass(mlir::createConvertControlFlowToLLVMPass());
     pm.addPass(mlir::createCanonicalizerPass());
@@ -180,6 +195,10 @@ class OpenMPPipeline : public BackendPipeline {
 public:
   void build(mlir::PassManager &pm) const override {
     pm.addPass(mlir::createConvertBufferizationToMemRefPass());
+		pm.addPass(std::make_unique<MakeFunctionOpPublicPass>());
+    pm.addPass(mlir::createInlinerPass());
+    pm.addPass(mlir::createCanonicalizerPass());
+    pm.addPass(mlir::createCSEPass());
     pm.addPass(mlir::createConvertSCFToOpenMPPass());
     pm.addPass(mlir::createCanonicalizerPass());
     pm.addPass(mlir::createCSEPass());
