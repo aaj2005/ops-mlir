@@ -421,6 +421,36 @@ static std::size_t datByteSize(const DatDesc &dat) {
   return total;
 }
 
+static double computeDataTransfer(const LoopDesc &loop, const ArgDesc &arg) {
+  // stencil->stride is a per-dimension array (size loop.dims), not per-point:
+  // stride[i] == 0 means the stencil doesn't move along dimension i (e.g. a
+  // boundary condition applied on a single edge), so that axis shouldn't
+  // contribute its full iteration extent -- mirrors OPS's own
+  // ops_compute_transfer().
+  const int *stencilStride =
+      reinterpret_cast<const int *>(arg.stencil.stride);
+
+  double size = 1.0;
+  for (int i = 0; i < loop.dims; ++i) {
+    int64_t extent = loop.range[2 * i + 1] - loop.range[2 * i];
+    bool moves = !stencilStride || stencilStride[i] != 0;
+    if (moves && extent > 0)
+      size *= static_cast<double>(extent);
+  }
+  size *= arg.dat.elem_size *
+          ((arg.acc == OPS_READ || arg.acc == OPS_WRITE) ? 1.0 : 2.0);
+  return size;
+}
+
+static double computeDataTransferPerLoop(const LoopDesc &loop) {
+  double bytes = 0.0;
+  for (const ArgDesc &arg : loop.args) {
+    if (arg.argtype == OPS_ARG_DAT)
+      bytes += computeDataTransfer(loop, arg);
+  }
+  return bytes;
+}
+
 std::uintptr_t JITEngine::ensureDeviceBuffer(std::uintptr_t hostPtr,
                                              std::size_t bytes) {
 #ifdef OPS_ENABLE_CUDA
@@ -723,7 +753,7 @@ void JITEngine::execute(mlir::ExecutionEngine &engine) {
       return;
     }
     synchronizeBackend(backend_);
-    profiler_.end(loop.kernel_name, kernelStart);
+    profiler_.end(loop.kernel_name, kernelStart, computeDataTransferPerLoop(loop));
 #ifdef OPS_ENABLE_CUDA
     for (const auto &[hostPtr, bytes] : writebacks) {
       auto it = deviceBuffers_.find(hostPtr);
