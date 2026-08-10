@@ -266,6 +266,8 @@ public:
     pm.addNestedPass<mlir::gpu::GPUModuleOp>(mlir::createConvertGpuOpsToNVVMOps());
     mlir::GpuNVVMAttachTargetOptions gputargetOptions;
     gputargetOptions.chip = nvgpuSm_;
+    gputargetOptions.optLevel = 3;
+    // gputargetOptions.fastFlag = true;
     pm.addPass(mlir::createGpuNVVMAttachTarget(gputargetOptions));
     pm.addPass(mlir::createCanonicalizerPass());
     pm.addPass(mlir::createCSEPass());
