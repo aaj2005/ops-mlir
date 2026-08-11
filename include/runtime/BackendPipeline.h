@@ -1,6 +1,7 @@
 #ifndef OPS_BACKEND
 #define OPS_BACKEND
 #include <array>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -89,14 +90,14 @@ private:
     llvm::SmallVector<mlir::Value> ubs(op.getUpperBound());
     llvm::SmallVector<mlir::Value> steps(op.getStep());
 
-    // Matching OPS's default block sizes (32,4,1) for 3D loops.
     mlir::Value one = mlir::arith::ConstantIndexOp::create(builder, loc, 1);
     llvm::SmallVector<mlir::Value, 3> blockSizeVals(3, one);
     llvm::SmallVector<mlir::Value, 3> gridSizeVals(3, one);
     for (unsigned i = 0; i < 3; ++i) {
       if (i >= numLoops)
         continue;
-      int64_t tile = i < blockSizes_.size() ? blockSizes_[i] : 1;
+      unsigned tileIdx = numLoops - 1 - i;
+      int64_t tile = tileIdx < blockSizes_.size() ? blockSizes_[tileIdx] : 1;
       mlir::Value tripCount =
           mlir::arith::SubIOp::create(builder, loc, ubs[i], lbs[i]);
       tripCount =
@@ -234,6 +235,7 @@ public:
     pm.addPass(mlir::createCSEPass());
     pm.addPass(mlir::createReconcileUnrealizedCastsPass());
 
+    // Note: Tunable parameters
     pm.addPass(std::make_unique<MapParallelToGpuLaunchPass>(
         llvm::ArrayRef<int64_t>{32, 4, 1}));
 
@@ -267,6 +269,12 @@ public:
     mlir::GpuNVVMAttachTargetOptions gputargetOptions;
     gputargetOptions.chip = nvgpuSm_;
     gputargetOptions.optLevel = 3;
+    // Experiment hook: e.g. OPS_PTXAS_OPTS="-maxrregcount=64" to trade
+    // registers/thread for occupancy on register-bound kernels -- see
+    // ncu's "Block Limit Registers" for whether a given kernel is even
+    // register-limited before reaching for this.
+    if (const char *ptxasOpts = std::getenv("OPS_PTXAS_OPTS"))
+      gputargetOptions.cmdOptions = ptxasOpts;
     // gputargetOptions.fastFlag = true;
     pm.addPass(mlir::createGpuNVVMAttachTarget(gputargetOptions));
     pm.addPass(mlir::createCanonicalizerPass());
