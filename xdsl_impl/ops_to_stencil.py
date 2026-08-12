@@ -75,7 +75,24 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
     ndim = op.dims.value.data
     args = op.arg_list()
     dat_args = [a for a in args if a.argtype.data == ArgType.DAT]
+
+    # 
+    gbl_args = [
+        a for a in args
+        if a.argtype.data == ArgType.GBL and a.acc.data == Access.READ
+    ]
     num_idx_args = sum(1 for a in args if a.argtype.data == ArgType.IDX)
+
+    # MVP: only single-element ("dim == 1") double globals are supported --
+    # matches JITEngine::execute's gblScratch packing (lib/runtime/JITEngine.cpp),
+    # which only reads one f64 out of arg.data per ops_arg_gbl.
+    for arg in gbl_args:
+        if arg.dim.data != 1:
+            raise NotImplementedError(
+                f"ops_arg_gbl with dim={arg.dim.data} is not supported "
+                f"(kernel '{op.kernel_name.data}'); only scalar (dim=1) "
+                "double globals are modeled."
+            )
 
     d_m = halo_offsets(dat_args)
     apply_bounds = stencil.StencilBoundsAttr(
@@ -83,20 +100,26 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
     )
 
     field_types = [stencil.FieldType(field_bounds(arg.dat), f64) for arg in dat_args]
-    
-    # Outer function: ops_par_loop_<kernel>_<index>(fields...) -> ()
+
+    # Outer function: ops_par_loop_<kernel>_<index>(fields..., gbls...) -> ()
+    # gbl scalars are appended after the fields -- JITEngine::execute packs
+    # its gblScratch entries the same way, after all the dat pointers.
     kernel_name = op.kernel_name.data
     fn_name = f"ops_par_loop_{kernel_name}_{index}"
-    fn = func.FuncOp(fn_name, (tuple(field_types), ()), visibility="private")
+    fn = func.FuncOp(
+        fn_name, (tuple(field_types) + (f64,) * len(gbl_args), ()), visibility="private"
+    )
     block = fn.body.block
     fn_builder = Builder(InsertPoint.at_end(block))
+    dat_block_args = block.args[: len(dat_args)]
+    gbl_block_args = list(block.args[len(dat_args) :])
 
     # Partition dat args (by access mode) into stencil.apply's reads/writes
     reads: list[SSAValue] = []
     read_types = []
     read_stencils: list[StencilAttr] = []
     writes: list[SSAValue] = []
-    for arg, field in zip(dat_args, block.args):
+    for arg, field in zip(dat_args, dat_block_args):
         access = arg.acc.data
         if access in (Access.READ, Access.RW):
             reads.append(field)
@@ -105,18 +128,24 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
         if access in (Access.WRITE, Access.RW, Access.INC):
             writes.append(field)
 
-    # Apply block body: access reads, compute indices, call kernel
-    apply_block = Block(arg_types=read_types)
+    # Apply block body: access reads, compute indices, call kernel.
+    # stencil.apply is IsolatedFromAbove, so the gbl scalars can't be closed
+    # over from `fn`'s block -- they're threaded through as extra `args`
+    # operands (like the field reads) and show up as plain f64 block args,
+    # trailing the field args.
+    apply_block = Block(arg_types=read_types + [f64] * len(gbl_args))
     block_builder = Builder(InsertPoint.at_end(apply_block))
 
     # One stencil.access per real stencil point (from stencil_offsets), not
     # just a placeholder (0, ..., 0) -- so multi-point stencils (e.g. a 5pt
     # Laplacian) actually read all their neighbors.
     access_results = []
-    for block_arg, stencil_attr in zip(apply_block.args, read_stencils):
+    for block_arg, stencil_attr in zip(apply_block.args[: len(read_types)], read_stencils):
         for point in stencil_offsets(stencil_attr):
             access = block_builder.insert(stencil.AccessOp(block_arg, point))
             access_results.append(access.res)
+
+    gbl_values = list(apply_block.args[len(read_types) :])
 
     # alloca_scope lowers to explicit stacksave/stackrestore bracketing its region
     # (MemRefToLLVM.cpp's AllocaScopeOpLowering), so every iteration's
@@ -156,9 +185,10 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
             )
         idx_buffers.append(idx_buffer.memref)
 
-    call_args = access_results + idx_buffers
+    call_args = access_results + gbl_values + idx_buffers
     declare_kernel(
-        module, kernel_name, len(access_results), len(idx_buffers), ndim, num_results
+        module, kernel_name, len(access_results) + len(gbl_args), len(idx_buffers),
+        ndim, num_results
     )
 
     if num_results > 1:
@@ -189,10 +219,13 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
     )
     block_builder.insert(stencil.ReturnOp.get(list(alloca_scope.res)))
 
-    # Create ApplyOp in buffer semantic form
+    # Create ApplyOp in buffer semantic form. `args` (here `reads +
+    # gbl_block_args`) is a generic var_operand_def(Attribute), so the plain
+    # f64 gbl scalars ride alongside the field reads and land as the trailing
+    # f64 block args of apply_block (see above).
     fn_builder.insert(
         stencil.ApplyOp.build(
-            operands=[reads, writes, []],  # reduction operands empty for now
+            operands=[reads + gbl_block_args, writes, []],  # reduction operands empty for now
             regions=[Region([apply_block])],
             result_types=[[]],  # buffer semantic does not return results
             properties={"bounds": apply_bounds},

@@ -171,7 +171,7 @@ ArgDesc JITEngine::buildArgDesc(const ops_arg &arg) {
   desc.argtype = arg.argtype;
   desc.opt = arg.opt;
 
-  if (arg.argtype == OPS_ARG_DAT) {
+  if (arg.argtype == OPS_ARG_DAT || arg.argtype == OPS_ARG_GBL) {
     if (arg.dat)
       desc.dat = describeDat(arg.dat);
     if (arg.stencil)
@@ -734,11 +734,24 @@ void JITEngine::execute(mlir::ExecutionEngine &engine) {
       }
     }
 
+    std::vector<double> gblScratch;
+    gblScratch.reserve(loop.args.size());
+    for (const ArgDesc &arg : loop.args) {
+      // Only read-only globals are passed as values.
+      // Ignore reduction globals.
+      if (arg.argtype != OPS_ARG_GBL || arg.acc != OPS_READ)
+        continue;
+      gblScratch.push_back(*reinterpret_cast<const double *>(arg.data));
+    }
+
     llvm::SmallVector<void *> packedArgs;
-    packedArgs.reserve(datPtrs.size());
+    packedArgs.reserve(datPtrs.size() + gblScratch.size());
 
     for (void *&ptr : datPtrs) {
       packedArgs.push_back(&ptr);
+    }
+    for (double &v : gblScratch) {
+      packedArgs.push_back(&v);
     }
 
 #ifdef OPS_ENABLE_DEBUG
