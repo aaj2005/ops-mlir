@@ -90,21 +90,32 @@ private:
     llvm::SmallVector<mlir::Value> ubs(op.getUpperBound());
     llvm::SmallVector<mlir::Value> steps(op.getStep());
 
+    // Loop dimension i is mapped to hardware axis hw(i) = numLoops-1-i, so
+    // that the last (innermost) loop dimension -- the memref's unit-stride
+    // dimension for row-major layouts -- lands on hardware X
+    // (blockIdx.x/threadIdx.x), the axis that actually forms warps. The
+    // tile sizes in blockSizes_ are given in hardware-axis order (X, Y, Z),
+    // largest/coalescing-friendly first, so hw(i) is used consistently for
+    // both the tile-size lookup and the grid/block value slot -- previously
+    // the tile size was looked up via this reversal but stored back at
+    // loop-dimension index i, leaving the strided dimension on hardware X
+    // and the contiguous one on hardware Y, which serialized/uncoalesced
+    // any loop with a thin (extent-1) dimension.
     mlir::Value one = mlir::arith::ConstantIndexOp::create(builder, loc, 1);
     llvm::SmallVector<mlir::Value, 3> blockSizeVals(3, one);
     llvm::SmallVector<mlir::Value, 3> gridSizeVals(3, one);
-    for (unsigned i = 0; i < 3; ++i) {
-      if (i >= numLoops)
-        continue;
-      unsigned tileIdx = numLoops - 1 - i;
-      int64_t tile = tileIdx < blockSizes_.size() ? blockSizes_[tileIdx] : 1;
+    llvm::SmallVector<unsigned, 3> hwAxis(numLoops);
+    for (unsigned i = 0; i < numLoops; ++i) {
+      unsigned hw = numLoops - 1 - i;
+      hwAxis[i] = hw;
+      int64_t tile = hw < blockSizes_.size() ? blockSizes_[hw] : 1;
       mlir::Value tripCount =
           mlir::arith::SubIOp::create(builder, loc, ubs[i], lbs[i]);
       tripCount =
           mlir::arith::CeilDivSIOp::create(builder, loc, tripCount, steps[i]);
-      blockSizeVals[i] = mlir::arith::ConstantIndexOp::create(builder, loc, tile);
-      gridSizeVals[i] = mlir::arith::CeilDivSIOp::create(builder, loc, tripCount,
-                                                        blockSizeVals[i]);
+      blockSizeVals[hw] = mlir::arith::ConstantIndexOp::create(builder, loc, tile);
+      gridSizeVals[hw] = mlir::arith::CeilDivSIOp::create(builder, loc, tripCount,
+                                                         blockSizeVals[hw]);
     }
 
     auto launchOp = mlir::gpu::LaunchOp::create(
@@ -119,9 +130,10 @@ private:
 
     llvm::SmallVector<mlir::Value> globalIdx(numLoops);
     for (unsigned i = 0; i < numLoops; ++i) {
+      unsigned hw = hwAxis[i];
       mlir::Value withinTile =
-          mlir::arith::MulIOp::create(builder, loc, bIds[i], blockSizeVals[i]);
-      withinTile = mlir::arith::AddIOp::create(builder, loc, withinTile, tIds[i]);
+          mlir::arith::MulIOp::create(builder, loc, bIds[hw], blockSizeVals[hw]);
+      withinTile = mlir::arith::AddIOp::create(builder, loc, withinTile, tIds[hw]);
       mlir::Value scaled =
           mlir::arith::MulIOp::create(builder, loc, withinTile, steps[i]);
       mlir::Value idx = mlir::arith::AddIOp::create(builder, loc, lbs[i], scaled);
