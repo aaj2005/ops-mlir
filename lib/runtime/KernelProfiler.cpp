@@ -12,7 +12,7 @@ namespace ops_mlir {
             auto &s = byKernel[t.kernel_name];
             s.kernel_name = t.kernel_name;
             s.count += 1;
-            s.total_ms += t.milliseconds;
+            s.total_sec += t.seconds;
             s.total_bytes += t.bytes;
         }
 
@@ -21,7 +21,7 @@ namespace ops_mlir {
         for (auto &[name, stats] : byKernel) {
             result.push_back(stats);
         }
-        
+
         return result;
     }
 
@@ -29,14 +29,14 @@ namespace ops_mlir {
         std::cout << "=== Kernel Timing Summary ===\n";
         float totalTime = 0.0f;
         for (const auto &s : aggregate()) {
-            totalTime += s.total_ms;
+            totalTime += s.total_sec;
             std::cout << s.kernel_name << ": " << s.count << " calls, "
-                        << s.total_ms << " ms total, "
-                        << (s.total_ms / s.count) << " ms avg, "
+                        << s.total_sec << " s total, "
+                        << (s.total_sec / s.count) << " s avg, "
                         << s.bandwidth_gbps() << " GB/s\n";
         }
 
-        std::cout << "Total time: " << totalTime << " ms\n";
+        std::cout << "Total time: " << totalTime << " s\n";
     }
 
     void KernelProfiler::writeCsv(const std::string &path) const {
@@ -45,10 +45,10 @@ namespace ops_mlir {
             std::cerr << "KernelProfiler: failed to open " << path << " for writing\n";
         }
 
-        out << "kernel_name,calls,total_ms,avg_ms,bandwidth_gbps\n";
+        out << "kernel_name,calls,total_sec,avg_sec,bandwidth_gbps\n";
         for (const auto &s : aggregate()) {
-            out << s.kernel_name << "," << s.count << "," << s.total_ms << ","
-                << s.avg_ms() << "," << s.bandwidth_gbps() << "\n";
+            out << s.kernel_name << "," << s.count << "," << s.total_sec << ","
+                << s.avg_sec() << "," << s.bandwidth_gbps() << "\n";
         }
     }
 } // namespace ops_mlir

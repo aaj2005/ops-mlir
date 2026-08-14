@@ -10,7 +10,7 @@ namespace ops_mlir {
 
 struct KernelTiming {
     std::string kernel_name;
-    double milliseconds;
+    double seconds;
     // Bytes read/written by the kernel's dataset args, following the OPS
     // convention: extent-of-iteration-range * elem_size, counted once for
     // OPS_READ/OPS_WRITE and twice for OPS_RW/OPS_INC (data is both fetched
@@ -21,14 +21,14 @@ struct KernelTiming {
 struct KernelStats {
     std::string kernel_name;
     int count = 0;
-    double total_ms = 0.0;
+    double total_sec = 0.0;
     double total_bytes = 0.0;
-    double avg_ms() const { return count ? total_ms / count: 0.0; };
+    double avg_sec() const { return count ? total_sec / count: 0.0; };
     // Aggregate bandwidth in GB/s (bytes / 1024^3 per second), matching how
     // the OPS library reports "Bandwidth(GB/s)" per kernel.
     double bandwidth_gbps() const {
-        return total_ms > 0.0
-                   ? total_bytes / (total_ms / 1000.0) / (1024.0 * 1024.0 * 1024.0)
+        return total_sec > 0.0
+                   ? total_bytes / total_sec / (1024.0 * 1024.0 * 1024.0)
                    : 0.0;
     }
 };
@@ -40,14 +40,14 @@ public:
     [[nodiscard]] TimePoint start() const { return std::chrono::steady_clock::now(); }
 
     void end(const std::string &kernelName, TimePoint startTime, double bytes = 0.0) {
-        double ms = std::chrono::duration<double, std::milli>(
+        double sec = std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - startTime)
                         .count();
-        record(kernelName, ms, bytes);
+        record(kernelName, sec, bytes);
     }
 
-    void record(const std::string &kernelName, double ms, double bytes = 0.0) {
-        records_.push_back({kernelName, ms, bytes});
+    void record(const std::string &kernelName, double sec, double bytes = 0.0) {
+        records_.push_back({kernelName, sec, bytes});
     }
 
     const std::vector<KernelTiming> &records() const { return records_; }
