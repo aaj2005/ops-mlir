@@ -90,17 +90,6 @@ private:
     llvm::SmallVector<mlir::Value> ubs(op.getUpperBound());
     llvm::SmallVector<mlir::Value> steps(op.getStep());
 
-    // Loop dimension i is mapped to hardware axis hw(i) = numLoops-1-i, so
-    // that the last (innermost) loop dimension -- the memref's unit-stride
-    // dimension for row-major layouts -- lands on hardware X
-    // (blockIdx.x/threadIdx.x), the axis that actually forms warps. The
-    // tile sizes in blockSizes_ are given in hardware-axis order (X, Y, Z),
-    // largest/coalescing-friendly first, so hw(i) is used consistently for
-    // both the tile-size lookup and the grid/block value slot -- previously
-    // the tile size was looked up via this reversal but stored back at
-    // loop-dimension index i, leaving the strided dimension on hardware X
-    // and the contiguous one on hardware Y, which serialized/uncoalesced
-    // any loop with a thin (extent-1) dimension.
     mlir::Value one = mlir::arith::ConstantIndexOp::create(builder, loc, 1);
     llvm::SmallVector<mlir::Value, 3> blockSizeVals(3, one);
     llvm::SmallVector<mlir::Value, 3> gridSizeVals(3, one);

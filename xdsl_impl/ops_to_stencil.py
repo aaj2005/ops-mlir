@@ -53,12 +53,9 @@ def declare_kernel(
     ):
         return
 
-    # Fix ret hidden pointer issue when returning multiple results
-    # Idx arguments are passed as MemRefType(i32, [ndim]) to match the OPS kernel ABI
     param_types = (f64,) * num_f64_args + (MemRefType(i32, [ndim]),) * num_idx_args
 
     if num_results > 1:
-        # Out-pointer ABI: kernel writes results into a trailing MemRefType(f64, [num_results]) param
         param_types = param_types + (MemRefType(f64, [num_results]),)
         result_types = ()
     else:
@@ -84,9 +81,6 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
     ]
     num_idx_args = sum(1 for a in args if a.argtype.data == ArgType.IDX)
 
-    # MVP: only single-element ("dim == 1") double globals are supported --
-    # matches JITEngine::execute's gblScratch packing (lib/runtime/JITEngine.cpp),
-    # which only reads one f64 out of arg.data per ops_arg_gbl.
     for arg in gbl_args:
         if arg.dim.data != 1:
             raise NotImplementedError(
@@ -102,9 +96,6 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
 
     field_types = [stencil.FieldType(field_bounds(arg.dat), f64) for arg in dat_args]
 
-    # Outer function: ops_par_loop_<kernel>_<index>(fields..., gbls...) -> ()
-    # gbl scalars are appended after the fields -- JITEngine::execute packs
-    # its gblScratch entries the same way, after all the dat pointers.
     kernel_name = op.kernel_name.data
     fn_name = f"ops_par_loop_{kernel_name}_{index}"
     fn = func.FuncOp(
@@ -129,17 +120,9 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
         if access in (Access.WRITE, Access.RW, Access.INC):
             writes.append(field)
 
-    # Apply block body: access reads, compute indices, call kernel.
-    # stencil.apply is IsolatedFromAbove, so the gbl scalars can't be closed
-    # over from `fn`'s block -- they're threaded through as extra `args`
-    # operands (like the field reads) and show up as plain f64 block args,
-    # trailing the field args.
     apply_block = Block(arg_types=read_types + [f64] * len(gbl_args))
     block_builder = Builder(InsertPoint.at_end(apply_block))
 
-    # One stencil.access per real stencil point (from stencil_offsets), not
-    # just a placeholder (0, ..., 0) -- so multi-point stencils (e.g. a 5pt
-    # Laplacian) actually read all their neighbors.
     access_results = []
     for block_arg, stencil_attr in zip(apply_block.args[: len(read_types)], read_stencils):
         for point in stencil_offsets(stencil_attr):
@@ -148,9 +131,6 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
 
     gbl_values = list(apply_block.args[len(read_types) :])
 
-    # alloca_scope lowers to explicit stacksave/stackrestore bracketing its region
-    # (MemRefToLLVM.cpp's AllocaScopeOpLowering), so every iteration's
-    # allocas are released before the next one runs.
     num_results = len(writes) or 1
     scope_block = Block()
     scope_builder = Builder(InsertPoint.at_end(scope_block))
@@ -220,10 +200,6 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
     )
     block_builder.insert(stencil.ReturnOp.get(list(alloca_scope.res)))
 
-    # Create ApplyOp in buffer semantic form. `args` (here `reads +
-    # gbl_block_args`) is a generic var_operand_def(Attribute), so the plain
-    # f64 gbl scalars ride alongside the field reads and land as the trailing
-    # f64 block args of apply_block (see above).
     fn_builder.insert(
         stencil.ApplyOp.build(
             operands=[reads + gbl_block_args, writes, []],  # reduction operands empty for now
