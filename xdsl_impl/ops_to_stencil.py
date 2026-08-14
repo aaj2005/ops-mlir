@@ -14,12 +14,14 @@ from xdsl.passes import ModulePass
 from ops_dialect import ArgType, Access, DatAttr, ParLoopOp, StencilAttr
 
 def field_bounds(dat: DatAttr) -> list[tuple[int, int]]:
-    """Normalized 0-based field bounds: lb=0, ub=full allocated size per dim."""
-    return [(0, size) for size in dat.size_list]
+    """Normalized 0-based field bounds: lb=0, ub=full allocated size per dim,
+    reversed from OPS's [x, y, z] to put x last (unit-stride) -- see module note."""
+    return [(0, size) for size in reversed(dat.size_list)]
 
 def halo_offsets(dat_args) -> list[int]:
-    """Per-dim d_m values (negative) from the first dat — shared across all dats on a block."""
-    return list(dat_args[0].dat.d_m_list)
+    """Per-dim d_m values (negative) from the first dat, reversed to match
+    field_bounds's axis order -- shared across all dats on a block."""
+    return list(reversed(dat_args[0].dat.d_m_list))
 
 def stencil_offsets(stencil_attr: StencilAttr) -> list[tuple[int, ...]]:
     """Per-point access offsets for an arg's stencil.
@@ -33,13 +35,12 @@ def stencil_offsets(stencil_attr: StencilAttr) -> list[tuple[int, ...]]:
         return [tuple(0 for _ in range(dims))]
 
     flat = (ctypes.c_int32 * (dims * points)).from_address(addr)
-    return [tuple(flat[p * dims + d] for d in range(dims)) for p in range(points)]
+    return [tuple(reversed([flat[p * dims + d] for d in range(dims)])) for p in range(points)]
 
 def range_bounds(rng: list[int], ndim: int) -> list[tuple[int, int]]:
-    return [(rng[2 * i], rng[2 * i + 1]) for i in range(ndim)]
+    return list(reversed([(rng[2 * i], rng[2 * i + 1]) for i in range(ndim)]))
 
 def normalized_range_bounds(rng: list[int], d_m: list[int], ndim: int) -> list[tuple[int, int]]:
-    """Shift OPS iteration range by -d_m so bounds are relative to normalized (0-based) field."""
     return [(lb - dm, ub - dm) for (lb, ub), dm in zip(range_bounds(rng, ndim), d_m)]
 
 def declare_kernel(
@@ -178,7 +179,7 @@ def convert_par_loop(op: ParLoopOp, index: int, module: ModuleOp) -> func.FuncOp
                 arith.IndexCastOp(idx_op.idx, i32)
             )
             dim_const = scope_builder.insert(
-                arith.ConstantOp(IntegerAttr(d, IndexType()))
+                arith.ConstantOp(IntegerAttr(ndim - 1 - d, IndexType()))
             )
             scope_builder.insert(
                 memref.StoreOp.get(idx_i32.result, idx_buffer.memref, [dim_const.result])
