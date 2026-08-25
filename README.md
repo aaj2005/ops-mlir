@@ -72,7 +72,12 @@ source env_setup
 ### 4. Build ops-mlir
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++
+cmake -S . -B build \
+   -DCMAKE_BUILD_TYPE=Release \
+   -DCMAKE_C_COMPILER=$LLVM_BUILD_DIR/bin/clang \
+   -DCMAKE_CXX_COMPILER=$LLVM_BUILD_DIR/bin/clang++ \
+   -DPython3_EXECUTABLE=$OPS_MLIR_ROOT/.venv/bin/python3
+
 cmake --build build -j$(nproc)
 ```
 
