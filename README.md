@@ -5,6 +5,7 @@ MLIR Compiler Implementation for OPS DSL
 
 - CMake >= 3.20
 - A C++17 compiler
+- uv
 - [LLVM/MLIR](https://github.com/llvm/llvm-project) built from source, with the `mlir` project enabled
 - [OPS](https://github.com/OP-DSL/OPS) (the OPS DSL C library)
 - OpenMP
@@ -24,12 +25,16 @@ git clone https://github.com/llvm/llvm-project.git
 cd llvm-project
 mkdir build && cd build
 cmake -G Ninja ../llvm \
-   -DLLVM_ENABLE_PROJECTS=mlir \
+   -DLLVM_ENABLE_PROJECTS="clang;mlir" \
+   -DLLVM_ENABLE_RUNTIMES="openmp" \
    -DLLVM_BUILD_EXAMPLES=ON \
    -DLLVM_TARGETS_TO_BUILD="Native;NVPTX;AMDGPU" \
    -DCMAKE_BUILD_TYPE=Release \
    -DLLVM_ENABLE_ASSERTIONS=ON \
-ninja
+   -DCMAKE_C_COMPILER=clang \
+   -DCMAKE_CXX_COMPILER=clang++ 
+
+ninja # optional: -jN where N is the number of threads you want to use, default is nproc
 ```
 
 ### 2. Clone OPS
@@ -51,6 +56,10 @@ export LLVM_BUILD_DIR=/path/to/llvm-project/build
 export LLVM_SOURCE_DIR=/path/to/llvm-project/llvm
 export MLIR_SOURCE_DIR=/path/to/llvm-project/mlir
 export OPS_ROOT=/path/to/OPS/ops/c
+export HDF5_INSTALL_PATH=/path/to/HDF5_INSTALL
+
+export PATH=${MLIR_BUILD_DIR}/bin:$PATH
+export LD_LIBRARY_PATH=${MLIR_BUILD_DIR}:$LD_LIBRARY_PATH
 ```
 
 A template is provided in [`env_setup_template`](env_setup_template) — copy/edit it for your
@@ -81,13 +90,10 @@ Needed for OPS reductions.
 
 ```bash
 # Remove standard xDSL (if needed)
-pip uninstall xdsl
+# inside the root of the repo
+git clone https://github.com:Archii0/xdsl.git --branch stencil-reduce
 
-git clone https://github.com:Archii0/xdsl.git
-# you may need to change to the branch "stencil-reduce"
-# git checkout stencil-reduce
-
-pip install -e path/to/xdsl-fork
+uv sync
 
 ```
 
@@ -98,5 +104,6 @@ TLDR - only partial reduction support is upstreamed into xDSL, waiting on stenci
 Run the 2D Laplace example:
 
 ```bash
-./build/apps/c/laplace_2d/laplace_2d
+# this just ensures that we use the correct version of python and xdsl which are installed in the venv
+uv run ./build/apps/c/laplace_2d/laplace_2d
 ```

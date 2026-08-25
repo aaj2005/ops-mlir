@@ -35,3 +35,6 @@ __pycache__/
 
 # subproject clones
 xdsl/*
+
+*.log
+env_setup

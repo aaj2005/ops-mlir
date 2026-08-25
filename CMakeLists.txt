@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ops-mlir CXX)
+project(ops-mlir C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -70,8 +70,9 @@ endif()
 # omp.h and libomp.so live in the OpenMP runtime build alongside LLVM.
 # Derive the path from MLIR_BUILD_DIR (same LLVM tree) — no extra env var needed.
 cmake_path(GET MLIR_BUILD_DIR PARENT_PATH LLVM_PROJECT_DIR)
-set(OMP_RUNTIME_DIR "${LLVM_PROJECT_DIR}/openmp/build/runtime/src")
-if(NOT EXISTS "${OMP_RUNTIME_DIR}/omp.h")
+set(OMP_HEADERS_DIR "${LLVM_PROJECT_DIR}/build/lib/clang/23/include")
+set(OMP_RUNTIME_DIR "${LLVM_PROJECT_DIR}/build/runtimes/runtimes-bins/openmp/runtime/src")
+if(NOT EXISTS "${OMP_HEADERS_DIR}/omp.h")
   message(FATAL_ERROR "omp.h not found at ${OMP_RUNTIME_DIR}. "
     "Ensure the LLVM OpenMP runtime was built in-tree alongside MLIR_BUILD_DIR.")
 endif()
@@ -84,6 +85,7 @@ add_link_options(-fopenmp)
 #===============================================================================
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${OPS_INCLUDE_DIR})
+include_directories(${OMP_HEADERS_DIR})
 include_directories(${OMP_RUNTIME_DIR})
 link_directories(${OMP_RUNTIME_DIR})
 include_directories(${MLIR_INCLUDE_DIRS})
